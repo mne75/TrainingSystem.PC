@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Systemtest af analysedelen.
+
+    Projektet har sit eget Main og maa derfor ikke kompileres ind i WPF-programmet.
+    Derfor ligger det i test\, og derfor udelukker TrainingSystem.PC.csproj den mappe
+    fra sin egen kompilering.
+
+    Testene kalder de samme filer, som programmet bruger - ikke en kopi af dem.
+    Koer med:  dotnet run
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AssemblyName>TrainingSystem.Tests</AssemblyName>
+    <RootNamespace>TrainingSystem.Tests</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="../../Models/SensorMessage.cs" />
+    <Compile Include="../../Models/ReferenceRoute.cs" />
+    <Compile Include="../../Models/AnalysisResult.cs" />
+    <Compile Include="../../Models/SessionRecord.cs" />
+    <Compile Include="../../Services/SessionAnalyzer.cs" />
+    <Compile Include="../../Services/GapDetector.cs" />
+    <Compile Include="../../Services/RouteComparer.cs" />
+    <Compile Include="../../Services/NoiseFilter.cs" />
+    <Compile Include="../../Services/UdpMeasurementReceiver.cs" />
+    <Compile Include="../../Services/SessionStore.cs" />
+    <Compile Include="Listen.cs" />
+  </ItemGroup>
+</Project>

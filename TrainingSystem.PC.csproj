@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <!--
+    Testprojektet ligger i test\ og har sit eget Main. Uden denne udelukkelse ville
+    dets filer blive kompileret ind i WPF-programmet, og så ville der være to
+    indgangspunkter i samme program.
+  -->
+  <ItemGroup>
+    <Compile Remove="test\**" />
+    <None Remove="test\**" />
+    <EmbeddedResource Remove="test\**" />
+  </ItemGroup>
+</Project>
