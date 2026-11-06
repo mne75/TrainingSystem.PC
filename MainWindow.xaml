@@ -213,11 +213,12 @@
                                       HeadersVisibility="Column" GridLinesVisibility="Horizontal" MinHeight="110" MaxHeight="200">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="Tidsstempel UTC" Binding="{Binding TimestampUtc, StringFormat={}{0:HH:mm:ss.fff}}" Width="120" />
-                                    <DataGridTextColumn Header="Kilde" Binding="{Binding Source}" Width="100" />
+                                    <DataGridTextColumn Header="Indhold" Binding="{Binding Source}" Width="130" />
                                     <DataGridTextColumn Header="Løbenr." Binding="{Binding SequenceNumber}" Width="70" />
                                     <DataGridTextColumn Header="X (mm)" Binding="{Binding X, StringFormat={}{0:F1}}" Width="65" />
                                     <DataGridTextColumn Header="Y (mm)" Binding="{Binding Y, StringFormat={}{0:F1}}" Width="65" />
                                     <DataGridTextColumn Header="Vinkler X/Y/Z" Binding="{Binding Angles}" Width="*" />
+                                    <DataGridTextColumn Header="Kraft" Binding="{Binding Force}" Width="75" />
                                 </DataGrid.Columns>
                             </DataGrid>
                         </StackPanel>

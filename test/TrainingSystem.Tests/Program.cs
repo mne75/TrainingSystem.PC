@@ -110,7 +110,7 @@ for (int i = 0; i < 200; i++)
     });
 }
 var r4 = SessionAnalyzer.Analyze(start, start.AddSeconds(5), m4, route);
-Check("Pakketab opdaget", r4.PositionLossRatio > 0, $"{r4.PositionLossRatio * 100:F2} %");
+Check("Pakketab opdaget", r4.MaxPacketLossRatio > 0, $"{r4.MaxPacketLossRatio * 100:F2} %");
 
 // --- Test 5: referencerute fra en session (FR-07) ---------------------------
 var created = ReferenceRoute.FromMeasurements("Fra session", m1, start, 15);
@@ -256,6 +256,122 @@ Check("Analyse: filtrering reducerer middelafvigelsen",
 Check("Analyse: filtrering reducerer stoerste afvigelse",
       noisyFiltered.MaxDeviationMm < noisyRaw.MaxDeviationMm,
       $"{noisyRaw.MaxDeviationMm:F2} mm -> {noisyFiltered.MaxDeviationMm:F2} mm");
+
+
+
+// =====================================================================
+// Formatet fra Raspberry Pi: én samlet besked med alt i
+// =====================================================================
+
+const string piJson = """
+{"seq": 41, "t": 1762430000.25,
+ "quat": {"w": 0.7071, "x": 0.0, "y": 0.0, "z": 0.7071},
+ "force_n": 3.25, "force_counts": 5600,
+ "pos": {"x": 123.4, "y": 56.7, "inside": true},
+ "track_status": "probe:  x =   123.4 mm   y =    56.7 mm",
+ "pos_age_ms": 40}
+""";
+
+var pi = System.Text.Json.JsonSerializer.Deserialize<SensorMessage>(piJson)!.Normalize();
+
+Check("Pi: loebenummer laest", pi.SequenceNumber == 41, pi.SequenceNumber?.ToString() ?? "ingen");
+Check("Pi: kvaternion laest", pi.HasQuaternion && Math.Abs(pi.Qw!.Value - 0.7071) < 1e-6);
+Check("Pi: position laest", pi.HasPositionXY &&
+      Math.Abs(pi.X!.Value - 123.4) < 1e-9 && Math.Abs(pi.Y!.Value - 56.7) < 1e-9);
+Check("Pi: kraft laest som tryk", pi.Pressure.HasValue &&
+      Math.Abs(pi.Pressure!.Value - 3.25) < 1e-9 && pi.PressureUnit == "N");
+Check("Pi: tidsstempel fra t",
+      pi.EffectiveTimestampUtc == DateTimeOffset.FromUnixTimeMilliseconds(1762430000250),
+      pi.EffectiveTimestampUtc.ToString("u"));
+Check("Pi: kameratid er 40 ms foer beskeden",
+      Math.Abs((pi.EffectiveTimestampUtc - pi.PositionTimestampUtc).TotalMilliseconds - 40) < 1e-6);
+Check("Pi: vinkler kan beregnes", pi.GetEulerDegrees() is not null);
+Check("Pi: én stroem", pi.StreamKey == "samlet", pi.StreamKey);
+
+// Null-felter: Pi'en sender "quat": null, naar rotationen ikke kunne laeses,
+// og "pos": null, naar probemarkoeren er daekket.
+const string piNulls = """
+{"seq": 42, "t": 1762430000.275, "quat": null, "force_n": null,
+ "force_counts": null, "pos": null,
+ "track_status": "probe marker (ID 4) not visible", "pos_age_ms": null}
+""";
+var piGap = System.Text.Json.JsonSerializer.Deserialize<SensorMessage>(piNulls)!.Normalize();
+Check("Pi: tomme felter giver ingen maalinger",
+      !piGap.HasPositionXY && !piGap.HasOrientation && !piGap.Pressure.HasValue);
+Check("Pi: aarsagen foelger med", piGap.TrackStatus!.Contains("not visible"));
+
+// --- hel session i Pi-format ---------------------------------------------
+// 40 Hz i 10 s. Kameraet leverer kun 20 Hz, saa hver position gentages én gang.
+// Markoeren er daekket fra 4 s til 6 s.
+var piSession = new List<SensorMessage>();
+DateTimeOffset lastCamera = start;
+double lastX = 0, lastY = 0;
+for (int i = 0; i < 400; i++)
+{
+    var t = start.AddMilliseconds(i * 25);
+    bool occluded = i >= 160 && i < 240;
+    bool newFrame = i % 2 == 0;
+    if (newFrame && !occluded)
+    {
+        lastCamera = t;
+        lastX = i * 0.5;
+        lastY = 0;
+    }
+    int? age = occluded ? null : (int)(t - lastCamera).TotalMilliseconds;
+    piSession.Add(new SensorMessage
+    {
+        Seq = i + 1,
+        T = t.ToUnixTimeMilliseconds() / 1000.0,
+        Quat = new SensorMessage.QuaternionPayload { W = 1, X = 0, Y = 0, Z = 0 },
+        ForceN = 2.0,
+        Pos = occluded ? null : new SensorMessage.PositionPayload { X = lastX, Y = lastY, Inside = true },
+        TrackStatus = occluded ? "probe marker (ID 4) not visible" : "probe: ok",
+        PositionAgeMs = age,
+    }.Normalize());
+}
+
+var piResult = SessionAnalyzer.Analyze(start, start.AddSeconds(10), piSession, route);
+
+Check("Pi-session: alle beskeder taelles", piResult.TotalMessages == 400, piResult.TotalMessages.ToString());
+Check("Pi-session: rotation i alle beskeder", piResult.OrientationSamples == 400,
+      piResult.OrientationSamples.ToString());
+Check("Pi-session: gentagne positioner fjernet", piResult.RepeatedPositionSamples > 0,
+      $"{piResult.RepeatedPositionSamples} gentagelser, {piResult.PositionSamples} unikke");
+Check("Pi-session: unikke positioner svarer til kameraets takt",
+      piResult.PositionSamples is > 140 and < 170, piResult.PositionSamples.ToString());
+Check("Pi-session: okklusionen blev et datagab",
+      piResult.Gaps.Any(g => g.Source == MeasurementSource.Position && g.DurationSeconds > 1.5),
+      $"{piResult.GapCount} gab, {piResult.GapSeconds:F1} s");
+Check("Pi-session: aarsagen kommer fra track_status",
+      piResult.Gaps.Any(g => g.Reason.Contains("not visible")),
+      piResult.Gaps.FirstOrDefault(g => g.Source == MeasurementSource.Position)?.Reason ?? "ingen");
+Check("Pi-session: intet pakketab", piResult.MaxPacketLossRatio < 1e-9,
+      $"{piResult.MaxPacketLossRatio * 100:F2} %");
+Check("Pi-session: kraft regnet med", piResult.MeanContactForceN.HasValue &&
+      Math.Abs(piResult.MeanContactForceN!.Value - 2.0) < 1e-9);
+Check("Pi-session: \u00e9n stroem i taboversigten", piResult.Loss.Count == 1,
+      string.Join(", ", piResult.Loss.Select(l => l.Stream)));
+
+// Gentagelser maa ikke oedelaegge hastigheden: havde de taelt med, ville halvdelen
+// af alle skridt vaere nul, og variationskoefficienten ville eksplodere.
+Check("Pi-session: jaevnhed er beregnet", piResult.SmoothnessSpeedCv.HasValue,
+      piResult.SmoothnessSpeedCv?.ToString("F3") ?? "ingen");
+Check("Pi-session: jaevnhed ikke oedelagt af gentagelser",
+      piResult.SmoothnessSpeedCv < 0.5, piResult.SmoothnessSpeedCv?.ToString("F3") ?? "ingen");
+
+// Samme session MED filtrering slaaet til. Filteret kopierer beskederne, og kopien skal
+// baere pos_age_ms og track_status med - ellers bliver gentagne kamerabilleder talt som
+// nye maalinger, og aarsagen til et datagab forsvinder.
+var piFiltered = SessionAnalyzer.Analyze(start, start.AddSeconds(10), piSession, route,
+                                         false, new FilterSettings());
+Check("Pi-session med filter: gentagelser stadig fundet",
+      piFiltered.RepeatedPositionSamples == piResult.RepeatedPositionSamples,
+      $"{piFiltered.RepeatedPositionSamples} mod {piResult.RepeatedPositionSamples} uden filter");
+Check("Pi-session med filter: samme antal unikke positioner",
+      piFiltered.PositionSamples == piResult.PositionSamples,
+      $"{piFiltered.PositionSamples} mod {piResult.PositionSamples}");
+Check("Pi-session med filter: aarsagen er stadig med",
+      piFiltered.Gaps.Any(g => g.Reason.Contains("not visible")));
 
 
 Console.WriteLine();

@@ -47,15 +47,25 @@ public static class Listen
                 if (!message.TimestampUtc.HasValue && !message.T.HasValue)
                     message.TimestampUtc = DateTimeOffset.UtcNow;
 
-                string source = GapDetector.Name(GapDetector.SourceOf(message));
                 lock (gate)
                 {
                     messages.Add(message);
-                    counts[source] = counts.GetValueOrDefault(source) + 1;
-                    if (!firstSeen.ContainsKey(source))
+                    counts["beskeder i alt"] = counts.GetValueOrDefault("beskeder i alt") + 1;
+
+                    // En samlet besked fra Pi'en bærer flere signaler. Hvert signal tælles
+                    // for sig, ellers ser det ud som om det ene aldrig kom.
+                    foreach (var signal in new[] { MeasurementSource.Orientation,
+                                                   MeasurementSource.Position,
+                                                   MeasurementSource.ContactForce })
                     {
-                        firstSeen[source] = DateTimeOffset.UtcNow;
-                        Console.WriteLine($"  [{DateTime.Now:HH:mm:ss}] første pakke fra {source}");
+                        if (!GapDetector.HasSignal(message, signal)) continue;
+                        string name = GapDetector.Name(signal);
+                        counts[name] = counts.GetValueOrDefault(name) + 1;
+                        if (!firstSeen.ContainsKey(name))
+                        {
+                            firstSeen[name] = DateTimeOffset.UtcNow;
+                            Console.WriteLine($"  [{DateTime.Now:HH:mm:ss}] første {name}");
+                        }
                     }
                 }
                 return Task.CompletedTask;

@@ -666,6 +666,7 @@ public partial class MainWindow : Window
         public double? X { get; init; }
         public double? Y { get; init; }
         public string Angles { get; init; } = "—";
+        public string Force { get; init; } = "—";
 
         public static MeasurementRow From(SensorMessage m)
         {
@@ -673,13 +674,15 @@ public partial class MainWindow : Window
             return new MeasurementRow
             {
                 TimestampUtc = m.EffectiveTimestampUtc,
-                Source = GapDetector.Name(GapDetector.SourceOf(m)),
+                // En samlet besked fra Pi'en bærer flere signaler på én gang.
+                Source = GapDetector.Describe(m),
                 SequenceNumber = m.SequenceNumber,
                 X = m.X,
                 Y = m.Y,
                 Angles = angles.HasValue
                     ? $"{angles.Value.X:F1} / {angles.Value.Y:F1} / {angles.Value.Z:F1}°"
-                    : "—"
+                    : "—",
+                Force = m.Pressure.HasValue ? $"{m.Pressure.Value:F2} N" : "—"
             };
         }
     }

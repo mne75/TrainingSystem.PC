@@ -454,6 +454,15 @@ public static class NoiseFilter
         AngleY = m.AngleY,
         AngleZ = m.AngleZ,
         Pressure = m.Pressure,
-        PressureUnit = m.PressureUnit
+        PressureUnit = m.PressureUnit,
+        // Felterne fra Pi-formatet skal med. Uden pos_age_ms mister den filtrerede
+        // besked sit kameratidsstempel, og gentagne positioner bliver talt som nye
+        // målinger. Uden track_status forsvinder forklaringen på et datagab.
+        Seq = m.Seq,
+        ForceN = m.ForceN,
+        ForceCounts = m.ForceCounts,
+        TrackStatus = m.TrackStatus,
+        PositionAgeMs = m.PositionAgeMs,
+        PositionInside = m.PositionInside
     };
 }

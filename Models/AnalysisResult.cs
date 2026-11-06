@@ -62,6 +62,13 @@ public sealed class AnalysisResult
     public int TotalMessages { get; set; }
     public int PositionSamples { get; set; }
     public int OrientationSamples { get; set; }
+
+    /// <summary>
+    /// Positionsmaalinger, der var gentagelser af samme kamerabillede. Pi'en sender
+    /// hurtigere, end kameraet leverer, saa den samme position optraeder i flere beskeder.
+    /// De taeller kun én gang i analysen.
+    /// </summary>
+    public int RepeatedPositionSamples { get; set; }
     public int ContactForceSamples { get; set; }
 
     // --- de fem værdier i FR-09 ---
@@ -82,8 +89,14 @@ public sealed class AnalysisResult
     public double GapSeconds { get; set; }
     public double GapRatio { get; set; }
     public int GapCount { get; set; }
-    public double PositionLossRatio { get; set; }
-    public double OrientationLossRatio { get; set; }
+    /// <summary>Pakketab pr. datastroem (NFR-R-01). Pi'en sender alt i én stroem.</summary>
+    public List<Services.GapDetector.StreamLoss> Loss { get; set; } = new();
+
+    /// <summary>Det hoejeste pakketab blandt stroemmene.</summary>
+    public double MaxPacketLossRatio => Loss.Count == 0 ? 0 : Loss.Max(l => l.Ratio);
+
+    /// <summary>Antal gange en afsender blev genstartet midt i sessionen.</summary>
+    public int SenderRestarts => Loss.Sum(l => l.Restarts);
 
     public double CorridorMm { get; set; }
     public string? ReferenceRouteName { get; set; }

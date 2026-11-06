@@ -14,6 +14,13 @@ public static class SessionAnalyzer
     /// <summary>Grænse for pakketab, hvor datagrundlaget skal markeres (NFR-R-01).</summary>
     public const double MaxLossRatio = 0.01;
 
+    /// <summary>
+    /// To positionsmålinger tættere end dette på hinanden stammer fra samme kamerabillede.
+    /// Et kamera, der leverer hurtigere end 125 billeder i sekundet, ville blive slået
+    /// sammen — det er langt over, hvad opstillingen bruger.
+    /// </summary>
+    public const double SameCameraFrameSeconds = 0.008;
+
     public static AnalysisResult Analyze(
         DateTimeOffset startedAt,
         DateTimeOffset endedAt,
@@ -36,12 +43,30 @@ public static class SessionAnalyzer
         var (working, filterReport) = NoiseFilter.Apply(measurements, filterSettings ?? FilterSettings.Off);
         result.Filter = filterReport;
 
-        var positions = working
+        // Pi'en sender med fast frekvens, men kameraet leverer langsommere. Den samme
+        // position optræder derfor i flere beskeder i træk. Tages de alle med, fyldes
+        // hastighedsberegningen med nuller, og bevægelsesjævnheden bliver meningsløs.
+        // Billedtidspunktet (t minus pos_age_ms) afgør, hvad der er den samme måling.
+        var allPositions = working
             .Where(m => m.HasPositionXY)
-            .OrderBy(m => m.EffectiveTimestampUtc)
+            .OrderBy(m => m.PositionTimestampUtc)
             .ToList();
 
+        // Baade t og pos_age_ms er hele millisekunder, saa to beskeder fra samme
+        // kamerabillede kan lande 1-2 ms fra hinanden. Der sammenlignes derfor med en
+        // tolerance i stedet for paa nøjagtigt samme tidsstempel.
+        var positions = new List<SensorMessage>();
+        foreach (var m in allPositions)
+        {
+            if (positions.Count > 0 &&
+                (m.PositionTimestampUtc - positions[^1].PositionTimestampUtc).TotalSeconds
+                    <= SameCameraFrameSeconds)
+                continue;
+            positions.Add(m);
+        }
+
         result.PositionSamples = positions.Count;
+        result.RepeatedPositionSamples = allPositions.Count - positions.Count;
         result.OrientationSamples = working.Count(m => m.HasOrientation);
         result.ContactForceSamples = working.Count(m => m.Pressure.HasValue);
 
@@ -51,8 +76,7 @@ public static class SessionAnalyzer
         result.GapCount = gaps.Gaps.Count;
         result.GapSeconds = gaps.TotalGapSeconds;
         result.GapRatio = gaps.GapRatio;
-        result.PositionLossRatio = gaps.PositionLossRatio;
-        result.OrientationLossRatio = gaps.OrientationLossRatio;
+        result.Loss = gaps.Loss;
         result.ValidDuration = TimeSpan.FromSeconds(
             Math.Max(0, result.Duration.TotalSeconds - gaps.TotalGapSeconds));
 
@@ -103,7 +127,7 @@ public static class SessionAnalyzer
             double step = Math.Sqrt(dx * dx + dy * dy);
             path += step;
 
-            double seconds = (current.EffectiveTimestampUtc - previous.EffectiveTimestampUtc).TotalSeconds;
+            double seconds = (current.PositionTimestampUtc - previous.PositionTimestampUtc).TotalSeconds;
             // Spring over et datagab: en hastighed beregnet hen over et hul beskriver
             // ikke en bevægelse, der har fundet sted.
             if (seconds > 0 && seconds <= GapDetector.MaxSampleIntervalSeconds)
@@ -186,11 +210,17 @@ public static class SessionAnalyzer
         if (result.ContactForceSamples == 0)
             result.Notes.Add("Kontaktkraft blev ikke modtaget. FR-11 er ikke realiseret på probe-siden.");
 
-        if (result.PositionLossRatio > MaxLossRatio)
-            result.Notes.Add($"Pakketab i positionsstrømmen er {result.PositionLossRatio * 100:F1} %, over grænsen på {MaxLossRatio * 100:F0} % (NFR-R-01).");
+        foreach (var loss in result.Loss.Where(l => l.Ratio > MaxLossRatio))
+            result.Notes.Add($"Pakketab i strømmen \"{loss.Stream}\" er {loss.Ratio * 100:F1} % " +
+                             $"({loss.Missing} af {loss.Expected}), over grænsen på {MaxLossRatio * 100:F0} % (NFR-R-01).");
 
-        if (result.OrientationLossRatio > MaxLossRatio)
-            result.Notes.Add($"Pakketab i orienteringsstrømmen er {result.OrientationLossRatio * 100:F1} %, over grænsen på {MaxLossRatio * 100:F0} % (NFR-R-01).");
+        if (result.SenderRestarts > 0)
+            result.Notes.Add($"En afsender blev genstartet {result.SenderRestarts} gang(e) midt i sessionen. " +
+                             "Løbenumrene starter forfra, og målingerne før og efter hører ikke til samme forløb.");
+
+        if (result.RepeatedPositionSamples > 0)
+            result.Notes.Add($"{result.RepeatedPositionSamples} beskeder gentog en position, kameraet allerede havde leveret. " +
+                             "De tæller kun én gang, så hastighed og jævnhed ikke fyldes med stilstand.");
 
         if (result.GapCount > 0)
             result.Notes.Add($"{result.GapCount} datagab på i alt {result.GapSeconds:F1} s er markeret og indgår ikke som målte positioner (FR-10).");
@@ -243,9 +273,8 @@ public static class SessionAnalyzer
             $"  Positionsmålinger:      {r.PositionSamples}",
             $"  Orienteringsmålinger:   {r.OrientationSamples}",
             $"  Kraftmålinger:          {r.ContactForceSamples}",
+            $"  Gentagne positioner:    {r.RepeatedPositionSamples} (samme kamerabillede)",
             $"  Datagab:                {r.GapCount} stk., i alt {r.GapSeconds:F1} s ({r.GapRatio * 100:F1} %)",
-            $"  Pakketab position:      {r.PositionLossRatio * 100:F2} %",
-            $"  Pakketab orientering:   {r.OrientationLossRatio * 100:F2} %",
             "",
             "BEVÆGELSE",
             $"  Vejlængde:              {Fmt(r.PathLengthMm, "mm")}",
@@ -254,6 +283,15 @@ public static class SessionAnalyzer
             $"  Middel kontaktkraft:    {Fmt(r.MeanContactForceN, "N")}",
             $"  Maks. kontaktkraft:     {Fmt(r.MaxContactForceN, "N")}"
         };
+
+        if (r.Loss.Count > 0)
+        {
+            lines.Add("");
+            lines.Add("PAKKETAB PR. STRØM (NFR-R-01)");
+            foreach (var l in r.Loss)
+                lines.Add($"  {l.Stream,-14} {l.Missing} af {l.Expected} forventede " +
+                          $"({l.Ratio * 100:F2} %)" + (l.Restarts > 0 ? $", {l.Restarts} genstart(er)" : ""));
+        }
 
         if (r.Filter is { Applied: true } f)
         {

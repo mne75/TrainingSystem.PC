@@ -29,6 +29,98 @@ public sealed class SensorMessage
     [JsonPropertyName("pressure")] public double? Pressure { get; set; }
     [JsonPropertyName("pressureUnit")] public string? PressureUnit { get; set; }
 
+    // ---------------------------------------------------------------------
+    // Formatet fra Raspberry Pi (sensor_stream_tracking.py)
+    //
+    // Pi'en sender én samlet besked pr. måling med rotation, kraft og position
+    // i hver sin undergruppe, og med ét fælles løbenummer. Felterne herunder
+    // læser det format; Normalize() kopierer dem over i felterne ovenfor, så
+    // resten af programmet kun kender én form.
+    // ---------------------------------------------------------------------
+
+    [JsonPropertyName("seq")] public long? Seq { get; set; }
+    [JsonPropertyName("quat")] public QuaternionPayload? Quat { get; set; }
+    [JsonPropertyName("pos")] public PositionPayload? Pos { get; set; }
+    [JsonPropertyName("force_n")] public double? ForceN { get; set; }
+    [JsonPropertyName("force_counts")] public int? ForceCounts { get; set; }
+    [JsonPropertyName("track_status")] public string? TrackStatus { get; set; }
+
+    /// <summary>
+    /// Hvor gammelt kamerabilledet bag positionen er, i millisekunder. Pi'en sender
+    /// hurtigere, end kameraet leverer, så den samme position gentages i flere beskeder.
+    /// Feltet er det, der gør det muligt at kende forskel på en ny og en gentaget måling.
+    /// </summary>
+    [JsonPropertyName("pos_age_ms")] public int? PositionAgeMs { get; set; }
+
+    /// <summary>Om positionen lå inden for det kalibrerede kvadrat.</summary>
+    [JsonIgnore] public bool? PositionInside { get; set; }
+
+    public sealed class QuaternionPayload
+    {
+        [JsonPropertyName("w")] public double W { get; set; }
+        [JsonPropertyName("x")] public double X { get; set; }
+        [JsonPropertyName("y")] public double Y { get; set; }
+        [JsonPropertyName("z")] public double Z { get; set; }
+    }
+
+    public sealed class PositionPayload
+    {
+        [JsonPropertyName("x")] public double X { get; set; }
+        [JsonPropertyName("y")] public double Y { get; set; }
+        [JsonPropertyName("inside")] public bool? Inside { get; set; }
+    }
+
+    /// <summary>
+    /// Oversætter Pi'ens format til de felter, resten af programmet bruger.
+    /// Kaldes af modtageren, lige efter at pakken er læst, og er uskadelig at kalde
+    /// på en besked, der allerede er på den flade form.
+    /// </summary>
+    public SensorMessage Normalize()
+    {
+        if (!SequenceNumber.HasValue && Seq.HasValue) SequenceNumber = Seq;
+
+        if (Quat is not null && !HasQuaternion)
+        {
+            Qw = Quat.W;
+            Qx = Quat.X;
+            Qy = Quat.Y;
+            Qz = Quat.Z;
+        }
+
+        if (Pos is not null && !HasPositionXY)
+        {
+            X = Pos.X;
+            Y = Pos.Y;
+            PositionInside = Pos.Inside;
+        }
+
+        if (ForceN.HasValue && !Pressure.HasValue)
+        {
+            Pressure = ForceN;
+            PressureUnit ??= "N";
+        }
+
+        return this;
+    }
+
+    /// <summary>
+    /// Tidspunktet for den kameramåling, positionen stammer fra. Uden pos_age_ms
+    /// antages positionen at være målt samtidig med beskeden.
+    /// </summary>
+    [JsonIgnore]
+    public DateTimeOffset PositionTimestampUtc =>
+        PositionAgeMs.HasValue
+            ? EffectiveTimestampUtc.AddMilliseconds(-PositionAgeMs.Value)
+            : EffectiveTimestampUtc;
+
+    /// <summary>
+    /// Nøgle for den datastrøm, beskeden kom i. Pi'en sender alt i én strøm med ét
+    /// løbenummer; ældre afsendere brugte en strøm pr. signal. Pakketab skal opgøres
+    /// pr. strøm, for løbenumrene tælles op hver for sig.
+    /// </summary>
+    [JsonIgnore]
+    public string StreamKey => string.IsNullOrWhiteSpace(Type) ? "samlet" : Type!;
+
     [JsonIgnore]
     public DateTimeOffset EffectiveTimestampUtc => TimestampUtc ?? (T.HasValue
         ? DateTimeOffset.FromUnixTimeMilliseconds((long)(T.Value * 1000))

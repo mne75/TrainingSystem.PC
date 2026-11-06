@@ -38,7 +38,9 @@ public sealed class UdpMeasurementReceiver : IAsyncDisposable
                     var message = JsonSerializer.Deserialize<SensorMessage>(result.Buffer,
                         new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
                     if (message is not null)
-                        await onMessage(message);
+                        // Pi'en sender quat/pos/force_n i undergrupper. Normalize() lægger
+                        // dem over på de felter, resten af programmet kender.
+                        await onMessage(message.Normalize());
                 }
                 catch (JsonException)
                 {

@@ -21,25 +21,42 @@ Bemærk, at 172.20.10.x typisk er et telefon-hotspot. Pi'en og pc'en skal være 
 
 Indikatoren til venstre bliver orange ved "modtager" og grøn, når første pakke ankommer.
 
-## 2. Start afsenderne på Raspberry Pi
+## 2. Start afsenderen på Raspberry Pi
 
-**Orientering (BNO085):**
-
-```bash
-dotnet run -- --headless --host 172.20.10.7 --port 5005
-```
-
-**Position (kamera og ArUco):**
+Der er kun ét program at starte. `sensor_stream_tracking.py` læser rotation, kraft og
+position og sender det hele i én besked:
 
 ```bash
-python3 aruco_track.py --size 300 --host 172.20.10.7 --udp 5005
+python3 sensor_stream_tracking.py
 ```
 
-`--size` er afstanden i **millimeter mellem centrene** af to nabohjørnemarkører. Mål den;
+Indstillingerne står i filerne, ikke på kommandolinjen:
+
+| Hvad | Hvor |
+|---|---|
+| Pc'ens IP og port | `PC_IP` og `PC_PORT` øverst i `sensor_stream.py` |
+| Sendefrekvens | `RATE_HZ` i `sensor_stream.py` (40 Hz) |
+| Afstand mellem hjørnemarkører | `SIDE_MM` øverst i `sensor_stream_tracking.py` (320 mm) |
+| Kamera og opløsning | `CAM_INDEX`, `CAM_WIDTH`, `CAM_HEIGHT` samme sted |
+
+**`PC_IP` skal rettes til `172.20.10.7`**, hver gang pc'en skifter netværk.
+
+`SIDE_MM` er afstanden i **millimeter mellem centrene** af to nabohjørnemarkører. Mål den;
 tallet går direkte ind i alle positionsmålinger, og er det forkert, er alle afstande forkerte.
 
-Trackeren sender først, når alle fire hjørnemarkører har været synlige **og**
-probemarkøren er i billedet.
+Programmet tarerer tryksensoren ved start — hold proben ubelastet de første sekunder.
+
+Positionen kommer først med, når alle fire hjørnemarkører har været synlige **og**
+probemarkøren er i billedet. Indtil da sender Pi'en `"pos": null` med en forklaring i
+`track_status`, og pc-programmet viser det som et datagab.
+
+### Modultest hver for sig
+
+```bash
+python3 imu_viewer.py --nogui          kun rotationssensoren
+python3 fx29_test.py --log mt2.csv     kun kraftsensoren
+python3 aruco_tracker.py --snapshot    kun kameraet
+```
 
 ## 3. Første gang: optag en referencerute
 
@@ -78,7 +95,8 @@ Den tæller pakker pr. sekund, viser hvornår første pakke fra hver kilde ankom
 den rigtige analyse og gemmer sessionen, så den kan åbnes i programmet bagefter med
 **Åbn gemt session…**.
 
-Husk at lukke pc-programmet først — to programmer kan ikke lytte på samme port.
+Husk at lukke pc-programmet først — to programmer kan ikke lytte på samme port. Det
+gælder også `udp_receiver.py`: den og pc-programmet kan ikke køre samtidig.
 
 Tjekliste, hvis der ikke kommer noget:
 
@@ -97,8 +115,9 @@ cd tools
 python send_test_packets.py --host 127.0.0.1
 ```
 
-Scriptet efterligner de to rigtige strømme hver for sig: orientering ved 100 Hz og
-position ved 30 Hz, med hver sin løbenummerserie.
+Scriptet efterligner Pi'ens format: én samlet besked ved 40 Hz med rotation, kraft og
+position, ét fælles løbenummer, og et kamera der kun leverer 20 Hz — så den samme position
+gentages i to beskeder i træk, præcis som i virkeligheden.
 
 Nyttige tilvalg:
 
@@ -108,6 +127,8 @@ Nyttige tilvalg:
 | `--loss 0.03` | 3 % af positionspakkerne kastes væk | NFR-R-01 |
 | `--still --noise 3` | Proben ligger i ro med 3 mm støj | FR-12, støjreduktion |
 | `--shape linje` | Ret rute i stedet for cirkel | FR-01, FR-09 |
+| `--cam 10` | Langsommere kamera, flere gentagne positioner | |
+| `--no-force` | Ingen kraftmåling | FR-11 |
 | `--duration 60` | Stopper af sig selv efter 60 s | |
 
 ## FR-12 kræver to optagelser
@@ -125,3 +146,25 @@ Den skal måles på en optagelse med en kendt bevægelse.
 Med centreret vindue er forsinkelsen nul, fordi filtreringen sker efter sessionen.
 Vil I vise, hvad kravet ville koste et filter, der kørte live, så vælg **Kausalt** i
 rullemenuen: ved 100 ms vindue måler programmet 50 ms.
+
+
+---
+
+## Hvad pc-programmet gør ved Pi'ens beskeder
+
+Pi'en sender én samlet besked pr. måling. Pc-programmet oversætter den ved modtagelsen,
+og tre ting er værd at kende:
+
+**`quat: null` og `pos: null` er ikke pakketab.** Beskeden kom frem; sensoren havde bare
+ikke noget at give. Programmet skelner: pakketab tælles på huller i `seq`, mens datagab
+tælles på perioder uden en gyldig måling af det enkelte signal. En session kan have nul
+pakketab og alligevel være ikke-vurderbar, fordi markøren var dækket.
+
+**Gentagne positioner tælles kun én gang.** Pi'en sender 40 gange i sekundet, men kameraet
+leverer langsommere, så den samme position optræder i flere beskeder. `pos_age_ms` fortæller,
+hvor gammelt billedet er, og programmet bruger det til at finde ud af, hvad der er den samme
+måling. Uden det ville halvdelen af alle skridt være nul, og bevægelsesjævnheden ville blive
+meningsløs.
+
+**`track_status` bliver til forklaringen på et datagab.** Står der
+`probe marker (ID 4) not visible`, er det den tekst, der vises ved hullet i resultatet.
