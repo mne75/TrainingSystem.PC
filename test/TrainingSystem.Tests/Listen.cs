@@ -3,16 +3,13 @@ using TrainingSystem.PC.Services;
 
 namespace TrainingSystem.Tests;
 
-/// <summary>
-/// Diagnoseværktøj til opsætning af hardwaren.
-///
-/// Lytter på UDP-porten med nøjagtig de samme klasser, som programmet bruger, og skriver
-/// bagefter den samme analyse ud. Det gør det muligt at afgøre, om det er netværket,
-/// afsenderne eller brugergrænsefladen, der driller — uden at skulle gætte.
-///
-///   dotnet run -- --listen
-///   dotnet run -- --listen --port 5005 --seconds 30 --rute minrute.json
-/// </summary>
+// Diagnoseværktøj til opsætning af hardwaren.
+// Lytter på UDP-porten med nøjagtig de samme klasser, som programmet bruger, og skriver
+// bagefter den samme analyse ud. Det gør det muligt at afgøre, om det er netværket,
+// afsenderne eller brugergrænsefladen, der driller — uden at skulle gætte.
+//   dotnet run -- --listen
+//   dotnet run -- --listen --port 5005 --seconds 30 --rute minrute.json
+
 public static class Listen
 {
     public static async Task<int> RunAsync(string[] args)
