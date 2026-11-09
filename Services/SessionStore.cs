@@ -46,6 +46,12 @@ public static class SessionStore
     {
         Directory.CreateDirectory(RoutesFolder);
         string path = Path.Combine(RoutesFolder, SafeFileName(route.Name) + "_" + route.Id[..8] + ".json");
+        return SaveRoute(route, path);
+    }
+
+    /// <summary>Gemmer ruten på en sti, brugeren selv har valgt.</summary>
+    public static string SaveRoute(ReferenceRoute route, string path)
+    {
         File.WriteAllText(path, JsonSerializer.Serialize(route, Options));
         return path;
     }

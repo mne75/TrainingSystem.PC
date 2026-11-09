@@ -30,6 +30,7 @@
     <Compile Include="../../Services/NoiseFilter.cs" />
     <Compile Include="../../Services/UdpMeasurementReceiver.cs" />
     <Compile Include="../../Services/SessionStore.cs" />
+    <Compile Include="../../Services/SessionService.cs" />
     <Compile Include="Listen.cs" />
   </ItemGroup>
 </Project>

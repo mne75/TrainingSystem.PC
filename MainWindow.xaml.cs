@@ -18,12 +18,9 @@ namespace TrainingSystem.PC;
 /// </summary>
 public partial class MainWindow : Window
 {
-    private readonly UdpMeasurementReceiver _receiver = new();
+    // Lag 2. Vinduet taler kun med sessionstjenesten, ikke med modtager eller lagring.
+    private readonly SessionService _session = new();
     private readonly ObservableCollection<MeasurementRow> _rows = new();
-    private readonly List<SensorMessage> _sessionMessages = new();
-
-    private DateTimeOffset? _sessionStartedAt;
-    private bool _isSessionActive;
 
     private SensorMessage? _latestPositionMessage;
     private SensorMessage? _latestOrientationMessage;
@@ -40,12 +37,10 @@ public partial class MainWindow : Window
     private const int TrajectoryMaxPoints = 1500;
 
     private ReferenceRoute? _selectedRoute;
-    private ReferenceRoute? _routeUsedInSession;
     private AnalysisResult? _lastResult;
     private SessionRecord? _lastSession;
 
     private const int MaxVisibleRows = 400;
-    private const int MaxStoredSessionMessages = 200_000;
 
     public MainWindow()
     {
@@ -53,7 +48,7 @@ public partial class MainWindow : Window
         MeasurementsGrid.ItemsSource = _rows;
         Build3DScene();
         LoadRoutes();
-        Closing += async (_, _) => await _receiver.DisposeAsync();
+        Closing += async (_, _) => await _session.DisposeAsync();
     }
 
     // =====================================================================
@@ -70,7 +65,7 @@ public partial class MainWindow : Window
 
         try
         {
-            await _receiver.StartAsync(port, HandleMessageAsync);
+            await _session.StartListeningAsync(port, HandleMessageAsync);
             ListenButton.IsEnabled = false;
             StopListenButton.IsEnabled = true;
             PortTextBox.IsEnabled = false;
@@ -89,7 +84,7 @@ public partial class MainWindow : Window
 
     private async void StopListenButton_Click(object sender, RoutedEventArgs e)
     {
-        await _receiver.StopAsync();
+        await _session.StopListeningAsync();
         ListenButton.IsEnabled = true;
         StopListenButton.IsEnabled = false;
         PortTextBox.IsEnabled = true;
@@ -98,17 +93,12 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Kaldes for hver modtaget pakke. Under en session gemmes målingen, og kun probens
-    /// stilling i 3D opdateres. Der skrives ingen værdier, ingen graf og ingen vurdering
-    /// til skærmen før sessionen er afsluttet (FR-08).
+    /// Kaldes af sessionstjenesten for hver modtaget pakke. SessionService gemmer selv
+    /// målingen under en session; her opdateres kun probens stilling i 3D. Der skrives
+    /// ingen værdier, ingen graf og ingen vurdering til skærmen før sessionen er afsluttet (FR-08).
     /// </summary>
     private Task HandleMessageAsync(SensorMessage message)
     {
-        // Mangler afsenderen et tidsstempel, sættes pc'ens modtagetid én gang. Det er en
-        // fælles tidsbase, men ikke det samme som synkroniserede sensorure (FR-04).
-        if (!message.TimestampUtc.HasValue && !message.T.HasValue)
-            message.TimestampUtc = DateTimeOffset.UtcNow;
-
         return Dispatcher.InvokeAsync(() =>
         {
             ConnectionIndicator.Fill = Brushes.LimeGreen;
@@ -121,14 +111,8 @@ public partial class MainWindow : Window
             if (message.HasOrientation) _latestOrientationMessage = message;
             UpdateProbeVisual();
 
-            if (!_isSessionActive) return;
-
-            if (_sessionMessages.Count >= MaxStoredSessionMessages)
-            {
+            if (_session.IsSessionActive && _session.IsBufferFull)
                 SessionStatusText.Text = "Grænsen for antal målinger er nået — afslut sessionen.";
-                return;
-            }
-            _sessionMessages.Add(message);
         }).Task;
     }
 
@@ -138,7 +122,7 @@ public partial class MainWindow : Window
 
     private void LoadRoutes()
     {
-        var routes = SessionStore.LoadRoutes();
+        var routes = _session.LoadRoutes();
         RouteComboBox.Items.Clear();
         RouteComboBox.Items.Add("(ingen referencerute)");
         foreach (var route in routes) RouteComboBox.Items.Add(route);
@@ -169,11 +153,11 @@ public partial class MainWindow : Window
             return;
         }
 
-        Directory.CreateDirectory(SessionStore.RoutesFolder);
+        Directory.CreateDirectory(SessionService.RoutesFolder);
         var dialog = new Microsoft.Win32.SaveFileDialog
         {
             Title = "Gem sessionen som referencerute",
-            InitialDirectory = SessionStore.RoutesFolder,
+            InitialDirectory = SessionService.RoutesFolder,
             FileName = $"rute_{DateTime.Now:yyyyMMdd_HHmm}",
             DefaultExt = ".json",
             Filter = "Referencerute (*.json)|*.json"
@@ -181,17 +165,13 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog() != true) return;
 
         string name = Path.GetFileNameWithoutExtension(dialog.FileName);
-        var route = ReferenceRoute.FromMeasurements(
-            name, _lastSession.Measurements, _lastSession.StartedAtUtc, ReadCorridorMm());
+        var route = _session.SaveSessionAsRoute(_lastSession, name, ReadCorridorMm(), dialog.FileName);
 
-        if (!route.IsUsable)
+        if (route is null)
         {
             MessageBox.Show("Sessionen indeholder for få positionsmålinger til at danne en referencerute.");
             return;
         }
-
-        File.WriteAllText(dialog.FileName,
-            System.Text.Json.JsonSerializer.Serialize(route, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
 
         LoadRoutes();
         SelectRouteById(route.Id);
@@ -265,19 +245,17 @@ public partial class MainWindow : Window
 
     private void StartSessionButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_isSessionActive)
+        try
         {
-            MessageBox.Show("Der kører allerede en session.");
+            // Korridoren hører til ruten. Ændrer brugeren feltet, gælder ændringen for denne session.
+            _session.StartSession(_selectedRoute, ReadCorridorMm());
+        }
+        catch (InvalidOperationException ex)
+        {
+            MessageBox.Show(ex.Message);
             return;
         }
 
-        if (!_receiver.IsListening)
-        {
-            MessageBox.Show("Start modtagelsen, før du starter en session.");
-            return;
-        }
-
-        _sessionMessages.Clear();
         _rows.Clear();
         _positionOrigin = null;
         _latestPositionMessage = null;
@@ -290,13 +268,6 @@ public partial class MainWindow : Window
         TrajectoryVisual.Content = _trajectoryGroup;
         UpdateProbeVisual();
 
-        // Korridoren hører til ruten. Ændrer brugeren feltet, gælder ændringen for denne session.
-        double corridor = ReadCorridorMm();
-        _routeUsedInSession = _selectedRoute is null ? null : CloneWithCorridor(_selectedRoute, corridor);
-
-        _sessionStartedAt = DateTimeOffset.UtcNow;
-        _isSessionActive = true;
-
         IdlePanel.Visibility = Visibility.Collapsed;
         ResultsPanel.Visibility = Visibility.Collapsed;
         RunningPanel.Visibility = Visibility.Visible;
@@ -308,83 +279,55 @@ public partial class MainWindow : Window
         SaveAsRouteButton.IsEnabled = false;
         RouteComboBox.IsEnabled = false;
         CorridorTextBox.IsEnabled = false;
-        SessionStatusText.Text = _routeUsedInSession is null
+        var activeRoute = _session.ActiveRoute;
+        SessionStatusText.Text = activeRoute is null
             ? "Session i gang — ingen referencerute valgt"
-            : $"Session i gang — måles mod \"{_routeUsedInSession.Name}\"";
+            : $"Session i gang — måles mod \"{activeRoute.Name}\"";
     }
 
     private void EndSessionButton_Click(object sender, RoutedEventArgs e)
     {
-        if (!_isSessionActive || !_sessionStartedAt.HasValue) return;
+        if (!_session.IsSessionActive) return;
 
-        var endedAt = DateTimeOffset.UtcNow;
-        _isSessionActive = false;
+        // Sessionstjenesten analyserer og gemmer; vinduet viser kun resultatet.
+        var outcome = _session.EndSession(ReadFilterSettings());
+
         StartSessionButton.IsEnabled = true;
         EndSessionButton.IsEnabled = false;
         RouteComboBox.IsEnabled = true;
         CorridorTextBox.IsEnabled = true;
         SessionStatusText.Text = "Session afsluttet";
 
-        bool connectionLost = !_receiver.IsListening;
+        ShowResult(outcome.Session, outcome.Result);
+        SaveAsRouteButton.IsEnabled = outcome.Result.PositionSamples >= 2;
 
-        var result = SessionAnalyzer.Analyze(
-            _sessionStartedAt.Value, endedAt, _sessionMessages, _routeUsedInSession,
-            connectionLost, ReadFilterSettings());
-
-        var session = new SessionRecord
-        {
-            StartedAtUtc = _sessionStartedAt.Value,
-            EndedAtUtc = endedAt,
-            ReferenceRouteId = _routeUsedInSession?.Id,
-            ReferenceRouteName = _routeUsedInSession?.Name,
-            ReferenceRoute = _routeUsedInSession,
-            CorridorMm = result.CorridorMm,
-            Measurements = new List<SensorMessage>(_sessionMessages),
-            Analysis = result
-        };
-
-        ShowResult(session, result);
-        SaveAsRouteButton.IsEnabled = result.PositionSamples >= 2;
-
-        try
-        {
-            string path = SessionStore.SaveSession(session);
-            AnalysisTextBox.Text += Environment.NewLine + Environment.NewLine +
-                                    "Rådata og analyse er gemt i:" + Environment.NewLine + path;
-        }
-        catch (Exception ex)
-        {
-            AnalysisTextBox.Text += Environment.NewLine + Environment.NewLine +
-                                    "Sessionen kunne ikke gemmes: " + ex.Message;
-        }
+        AnalysisTextBox.Text += Environment.NewLine + Environment.NewLine +
+            (outcome.SavedPath is not null
+                ? "Rådata og analyse er gemt i:" + Environment.NewLine + outcome.SavedPath
+                : "Sessionen kunne ikke gemmes: " + outcome.SaveError);
     }
 
     private void OpenSessionButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_isSessionActive)
+        if (_session.IsSessionActive)
         {
             MessageBox.Show("Afslut den igangværende session, før du åbner en gemt session.");
             return;
         }
 
-        Directory.CreateDirectory(SessionStore.SessionsFolder);
+        Directory.CreateDirectory(SessionService.SessionsFolder);
         var dialog = new Microsoft.Win32.OpenFileDialog
         {
             Title = "Åbn gemt session",
-            InitialDirectory = SessionStore.SessionsFolder,
+            InitialDirectory = SessionService.SessionsFolder,
             Filter = "Session (*.json)|*.json"
         };
         if (dialog.ShowDialog() != true) return;
 
         try
         {
-            var session = SessionStore.LoadSession(dialog.FileName);
-
-            // Analysen beregnes forfra ud fra rådata. Giver den samme værdier som ved
-            // optagelsen, er FR-05 eftervist og ikke blot påstået.
-            var result = SessionAnalyzer.Analyze(
-                session.StartedAtUtc, session.EndedAtUtc, session.Measurements,
-                session.ReferenceRoute, false, ReadFilterSettings());
+            // Analysen beregnes forfra ud fra rådata (FR-05).
+            var (session, result) = _session.OpenSession(dialog.FileName, ReadFilterSettings());
 
             SaveAsRouteButton.IsEnabled = result.PositionSamples >= 2;
             SessionStatusText.Text = $"Indlæst: {Path.GetFileName(dialog.FileName)}";
@@ -398,10 +341,10 @@ public partial class MainWindow : Window
 
     private void OpenFolderButton_Click(object sender, RoutedEventArgs e)
     {
-        Directory.CreateDirectory(SessionStore.RootFolder);
+        Directory.CreateDirectory(SessionService.RootFolder);
         Process.Start(new ProcessStartInfo
         {
-            FileName = SessionStore.RootFolder,
+            FileName = SessionService.RootFolder,
             UseShellExecute = true
         });
     }
@@ -498,15 +441,6 @@ public partial class MainWindow : Window
 
     private static SolidColorBrush Brush(string hex) =>
         (SolidColorBrush)new BrushConverter().ConvertFromString(hex)!;
-
-    private static ReferenceRoute CloneWithCorridor(ReferenceRoute route, double corridorMm) => new()
-    {
-        Id = route.Id,
-        Name = route.Name,
-        CreatedUtc = route.CreatedUtc,
-        CorridorMm = corridorMm,
-        Points = route.Points
-    };
 
     // =====================================================================
     // 3D-visning

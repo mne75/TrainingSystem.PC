@@ -373,6 +373,60 @@ Check("Pi-session med filter: samme antal unikke positioner",
 Check("Pi-session med filter: aarsagen er stadig med",
       piFiltered.Gaps.Any(g => g.Reason.Contains("not visible")));
 
+// --- SessionService: sessionens livscyklus i lag 2 (NFR-S-01) --------------
+// Tjenesten testes uden brugergraenseflade. Gemningen erstattes, saa testen ikke
+// skriver i brugerens sessionsmappe.
+int freePort;
+using (var probe = new System.Net.Sockets.UdpClient(0))
+    freePort = ((System.Net.IPEndPoint)probe.Client.LocalEndPoint!).Port;
+
+var saved = new List<SessionRecord>();
+await using (var service = new SessionService(saveSession: s => { saved.Add(s); return "test.json"; }))
+{
+    bool refused = false;
+    try { service.StartSession(route, 15); } catch (InvalidOperationException) { refused = true; }
+    Check("Service: session kraever modtagelse", refused);
+
+    int shown = 0;
+    await service.StartListeningAsync(freePort, _ => { shown++; return Task.CompletedTask; });
+
+    await service.HandleMeasurementAsync(m1[0]);              // foer sessionen
+    service.StartSession(route, 25);
+    Check("Service: session aktiv", service.IsSessionActive);
+    Check("Service: korridor gaelder kun sessionen",
+          service.ActiveRoute!.CorridorMm == 25 && route.CorridorMm == 15,
+          $"{service.ActiveRoute.CorridorMm} / {route.CorridorMm}");
+
+    bool twice = false;
+    try { service.StartSession(route, 15); } catch (InvalidOperationException) { twice = true; }
+    Check("Service: kun én session ad gangen", twice);
+
+    foreach (var m in m1) await service.HandleMeasurementAsync(m);
+    var outcome = service.EndSession(FilterSettings.Off);
+    await service.HandleMeasurementAsync(m1[0]);              // efter sessionen
+
+    Check("Service: session afsluttet", !service.IsSessionActive);
+    Check("Service: kun maalinger under sessionen gemt",
+          outcome.Session.Measurements.Count == m1.Count,
+          $"{outcome.Session.Measurements.Count} af {m1.Count}");
+    Check("Service: alle maalinger vist live", shown == m1.Count + 2, $"{shown}");
+    Check("Service: analysen er kaldt", outcome.Result.MaxDeviationMm is > 19.9 and < 20.1,
+          $"{outcome.Result.MaxDeviationMm:F1} mm");
+    Check("Service: sessionen er gemt én gang", saved.Count == 1 && outcome.SavedPath == "test.json");
+    Check("Service: rute og korridor gemt med", outcome.Session.CorridorMm == 25 &&
+          outcome.Session.ReferenceRouteId == route.Id);
+}
+
+await using (var failing = new SessionService(saveSession: _ => throw new IOException("disken er fuld")))
+{
+    await failing.StartListeningAsync(freePort, _ => Task.CompletedTask);
+    failing.StartSession(null, 15);
+    foreach (var m in m1) await failing.HandleMeasurementAsync(m);
+    var o = failing.EndSession(FilterSettings.Off);
+    Check("Service: fejl ved gemning giver stadig resultat",
+          o.SavedPath is null && o.SaveError == "disken er fuld" && o.Result.PositionSamples == 101);
+}
+
 
 Console.WriteLine();
 Console.WriteLine(failures == 0 ? "ALLE TEST BESTAAET" : $"{failures} TEST FEJLEDE");
