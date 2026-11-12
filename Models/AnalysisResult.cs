@@ -1,4 +1,39 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
 namespace TrainingSystem.PC.Models;
+
+/// <summary>
+/// Læser en liste af tekster, men accepterer også én enkelt tekst. Sessioner gemt før
+/// 30. oktober havde forbeholdene som én samlet tekst; de skal stadig kunne åbnes (FR-05).
+/// </summary>
+public sealed class StringOrStringListConverter : JsonConverter<List<string>>
+{
+    public override List<string> Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        switch (reader.TokenType)
+        {
+            case JsonTokenType.Null:
+                return new List<string>();
+            case JsonTokenType.String:
+                return new List<string> { reader.GetString() ?? "" };
+            case JsonTokenType.StartArray:
+                var list = new List<string>();
+                while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
+                    if (reader.TokenType == JsonTokenType.String) list.Add(reader.GetString() ?? "");
+                return list;
+            default:
+                throw new JsonException($"Forventede tekst eller liste af tekster, fik {reader.TokenType}.");
+        }
+    }
+
+    public override void Write(Utf8JsonWriter writer, List<string> value, JsonSerializerOptions options)
+    {
+        writer.WriteStartArray();
+        foreach (var s in value) writer.WriteStringValue(s);
+        writer.WriteEndArray();
+    }
+}
 
 /// <summary>Hvilken datakilde en måling eller et datagab hører til.</summary>
 public enum MeasurementSource
@@ -135,6 +170,7 @@ public sealed class AnalysisResult
     /// <summary>Hastigheden over sessionen. Bevægelsesjævnheden (CV) beregnes ud fra den.</summary>
     public List<SpeedSample> Speeds { get; set; } = new();
 
+    [JsonConverter(typeof(StringOrStringListConverter))]
     public List<string> Notes { get; set; } = new();
 
     /// <summary>Feedback må kun vises, når sessionen kan vurderes (NFR-R-02).</summary>

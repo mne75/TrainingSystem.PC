@@ -427,6 +427,19 @@ await using (var failing = new SessionService(saveSession: _ => throw new IOExce
           o.SavedPath is null && o.SaveError == "disken er fuld" && o.Result.PositionSamples == 101);
 }
 
+// --- SyT-02: sessioner gemt i det gamle format kan stadig åbnes (FR-05) ------
+// Før 30/10 var forbeholdene én tekst i stedet for en liste.
+const string oldFormat = """
+{ "StartedAtUtc": "2026-10-28T13:26:34Z", "EndedAtUtc": "2026-10-28T13:27:00Z",
+  "Measurements": [], "Analysis": { "Notes": "Z-position er ikke modtaget." } }
+""";
+var oldSession = System.Text.Json.JsonSerializer.Deserialize<SessionRecord>(oldFormat)!;
+Check("SyT-02: gammelt sessionsformat kan læses",
+      oldSession.Analysis!.Notes.Count == 1 && oldSession.Analysis.Notes[0].StartsWith("Z-position"));
+var roundTrip = System.Text.Json.JsonSerializer.Deserialize<SessionRecord>(
+    System.Text.Json.JsonSerializer.Serialize(new SessionRecord { Analysis = new AnalysisResult { Notes = { "a", "b" } } }))!;
+Check("SyT-02: nyt format gemmes stadig som liste", roundTrip.Analysis!.Notes.SequenceEqual(new[] { "a", "b" }));
+
 // --- Systemtestene SyT-01, SyT-02, SyT-04 og SyT-06 uden hardware ----------
 // En session i Pi'ens format: 45 Hz, kameraet leverer hver anden besked, proben følger
 // referenceruten (0,0)-(200,0). "drop" fjerner beskeder (tabt i nettet), "covered"

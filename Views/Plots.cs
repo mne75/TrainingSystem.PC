@@ -8,8 +8,11 @@ using TrainingSystem.PC.Services;
 
 namespace TrainingSystem.PC.Views;
 
-/// <summary>Et punkt på den udførte rute, klar til tegning.</summary>
-public readonly record struct PathPoint(double X, double Y, bool InsideCorridor);
+/// <summary>
+/// Et punkt på den udførte rute, klar til tegning. Seconds er tiden fra sessionens start;
+/// den bruges til at finde datagab, så ruten ikke tegnes hen over et hul (FR-10).
+/// </summary>
+public readonly record struct PathPoint(double X, double Y, bool InsideCorridor, double Seconds);
 
 /// <summary>
 /// Tegner de to figurer, FR-09 kræver: ruteoverlayet og afvigelsen over tid.
@@ -25,6 +28,7 @@ public static class Plots
     private static readonly Brush TextBrush = new SolidColorBrush(Color.FromRgb(0x65, 0x75, 0x8B));
     private static readonly Brush GapBrush = new SolidColorBrush(Color.FromArgb(0x30, 0xC6, 0x28, 0x28));
     private static readonly Brush RawBrush = new SolidColorBrush(Color.FromRgb(0xA8, 0xB4, 0xC2));
+    private static readonly Brush GapLineBrush = new SolidColorBrush(Color.FromRgb(0xE0, 0x8A, 0x00));
 
     // =================================================================
     // Ruteoverlay: udført rute oven på referenceruten, i samme koordinatsystem (FR-01)
@@ -99,11 +103,35 @@ public static class Plots
             canvas.Children.Add(line);
         }
 
-        // Den udførte rute, farvet efter om punktet lå i korridoren.
+        // Den udførte rute, farvet efter om punktet lå i korridoren. Ved et datagab tegnes
+        // ingen målt rute; hullet vises som en stiplet linje med gabets varighed (FR-10).
+        bool anyGap = false;
         for (int i = 1; i < recorded.Count; i++)
         {
             var a = Map(recorded[i - 1].X, recorded[i - 1].Y);
             var b = Map(recorded[i].X, recorded[i].Y);
+            double seconds = recorded[i].Seconds - recorded[i - 1].Seconds;
+
+            if (seconds > GapDetector.MaxSampleIntervalSeconds)
+            {
+                anyGap = true;
+                canvas.Children.Add(new Line
+                {
+                    X1 = a.X, Y1 = a.Y, X2 = b.X, Y2 = b.Y,
+                    Stroke = GapLineBrush, StrokeThickness = 1.6,
+                    StrokeDashArray = new DoubleCollection { 3, 3 }
+                });
+                foreach (var end in new[] { a, b })
+                {
+                    var ring = new Ellipse { Width = 7, Height = 7, Stroke = GapLineBrush, StrokeThickness = 1.5, Fill = Brushes.White };
+                    Canvas.SetLeft(ring, end.X - 3.5);
+                    Canvas.SetTop(ring, end.Y - 3.5);
+                    canvas.Children.Add(ring);
+                }
+                Label(canvas, (a.X + b.X) / 2 + 6, (a.Y + b.Y) / 2 - 8, $"datagab {seconds:F1} s");
+                continue;
+            }
+
             canvas.Children.Add(new Line
             {
                 X1 = a.X, Y1 = a.Y, X2 = b.X, Y2 = b.Y,
@@ -119,7 +147,7 @@ public static class Plots
         }
 
         Label(canvas, 8, 6, $"Skala: 1 px ≈ {1 / scale:F2} mm");
-        Legend(canvas, w, route is { IsUsable: true });
+        Legend(canvas, w, route is { IsUsable: true }, anyGap);
     }
 
     // =================================================================
@@ -438,7 +466,7 @@ public static class Plots
         canvas.Children.Add(block);
     }
 
-    private static void Legend(Canvas canvas, double w, bool hasRoute)
+    private static void Legend(Canvas canvas, double w, bool hasRoute, bool hasGap = false)
     {
         double x = w - 150, y = 6;
         if (hasRoute)
@@ -447,6 +475,11 @@ public static class Plots
         }
         Swatch(canvas, x, y, InsideBrush, "i korridor"); y += 15;
         Swatch(canvas, x, y, OutsideBrush, "uden for");
+        if (hasGap)
+        {
+            y += 15;
+            Swatch(canvas, x, y, GapLineBrush, "datagab (ikke målt)");
+        }
     }
 
     private static void Swatch(Canvas canvas, double x, double y, Brush brush, string text)

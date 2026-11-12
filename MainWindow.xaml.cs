@@ -459,14 +459,15 @@ public partial class MainWindow : Window
     {
         if (result.Deviations.Count > 0)
             return result.Deviations
-                .Select(d => new PathPoint(d.XMm, d.YMm, d.InsideCorridor))
+                .Select(d => new PathPoint(d.XMm, d.YMm, d.InsideCorridor, d.OffsetSeconds))
                 .ToList();
 
         // Uden referencerute er der ingen korridor at farve efter; ruten vises alligevel.
         return session.Measurements
             .Where(m => m.HasPositionXY)
-            .OrderBy(m => m.EffectiveTimestampUtc)
-            .Select(m => new PathPoint(m.X!.Value, m.Y!.Value, true))
+            .OrderBy(m => m.PositionTimestampUtc)
+            .Select(m => new PathPoint(m.X!.Value, m.Y!.Value, true,
+                                       (m.PositionTimestampUtc - session.StartedAtUtc).TotalSeconds))
             .ToList();
     }
 
