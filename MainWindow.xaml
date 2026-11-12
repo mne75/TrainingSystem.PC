@@ -202,6 +202,11 @@
                                 <Canvas x:Name="DeviationCanvas" ClipToBounds="True" SizeChanged="DeviationCanvas_SizeChanged" />
                             </Border>
 
+                            <TextBlock Text="HASTIGHED OVER TID — BEVÆGELSESJÆVNHED" Style="{StaticResource SectionHeader}" />
+                            <Border BorderBrush="#DCE2EA" BorderThickness="1" CornerRadius="8" Background="#FDFDFE" Height="160" Margin="0,0,0,12">
+                                <Canvas x:Name="SpeedCanvas" ClipToBounds="True" SizeChanged="SpeedCanvas_SizeChanged" />
+                            </Border>
+
                             <TextBlock Text="STØJFILTRERING — FØR OG EFTER" Style="{StaticResource SectionHeader}" />
                             <Border BorderBrush="#DCE2EA" BorderThickness="1" CornerRadius="8" Background="#FDFDFE" Height="150" Margin="0,0,0,6">
                                 <Canvas x:Name="FilterCanvas" ClipToBounds="True" SizeChanged="FilterCanvas_SizeChanged" />

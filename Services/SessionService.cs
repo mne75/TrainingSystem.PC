@@ -147,8 +147,8 @@ public sealed class SessionService : IAsyncDisposable
             _startedAt = null;
         }
 
-        bool connectionLost = !IsListening;
-        var result = SessionAnalyzer.Analyze(startedAt, endedAt, messages, route, connectionLost, filter);
+        bool receiverStopped = !IsListening;
+        var result = SessionAnalyzer.Analyze(startedAt, endedAt, messages, route, receiverStopped, filter);
 
         var session = new SessionRecord
         {
@@ -159,7 +159,9 @@ public sealed class SessionService : IAsyncDisposable
             ReferenceRoute = route,
             CorridorMm = result.CorridorMm,
             Measurements = messages,
-            Analysis = result
+            Analysis = result,
+            Filter = filter,
+            ReceiverStopped = receiverStopped
         };
 
         try
@@ -173,10 +175,14 @@ public sealed class SessionService : IAsyncDisposable
     }
 
     /// <summary>
-    /// Indlæser en gemt session. Analysen beregnes forfra ud fra rådata; giver den samme
-    /// værdier som ved optagelsen, er FR-05 eftervist og ikke blot påstået.
+    /// Indlæser en gemt session. Analysen beregnes forfra ud fra rådata med den samme
+    /// filterindstilling, sessionen blev optaget med. Giver den samme værdier som ved
+    /// optagelsen, er FR-05 eftervist og ikke blot påstået.
     /// </summary>
-    public (SessionRecord Session, AnalysisResult Result) OpenSession(string path, FilterSettings filter)
+    /// <param name="fallbackFilter">
+    /// Bruges kun til sessioner gemt før filterindstillingen blev gemt med.
+    /// </param>
+    public (SessionRecord Session, AnalysisResult Result) OpenSession(string path, FilterSettings fallbackFilter)
     {
         if (IsSessionActive)
             throw new InvalidOperationException("Afslut den igangværende session, før du åbner en gemt session.");
@@ -184,7 +190,7 @@ public sealed class SessionService : IAsyncDisposable
         var session = SessionStore.LoadSession(path);
         var result = SessionAnalyzer.Analyze(
             session.StartedAtUtc, session.EndedAtUtc, session.Measurements,
-            session.ReferenceRoute, false, filter);
+            session.ReferenceRoute, session.ReceiverStopped, session.Filter ?? fallbackFilter);
         return (session, result);
     }
 

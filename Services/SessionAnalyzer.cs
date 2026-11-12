@@ -14,6 +14,9 @@ public static class SessionAnalyzer
     /// <summary>Grænse for pakketab, hvor datagrundlaget skal markeres (NFR-R-01).</summary>
     public const double MaxLossRatio = 0.01;
 
+    /// <summary>Længste tilladte tid fra afslutning til visning af feedback (NFR-P-01).</summary>
+    public const double MaxFeedbackSeconds = 10.0;
+
     /// <summary>
     /// To positionsmålinger tættere end dette på hinanden stammer fra samme kamerabillede.
     /// Et kamera, der leverer hurtigere end 125 billeder i sekundet, ville blive slået
@@ -26,7 +29,7 @@ public static class SessionAnalyzer
         DateTimeOffset endedAt,
         IReadOnlyList<SensorMessage> measurements,
         ReferenceRoute? route,
-        bool connectionLost = false,
+        bool receiverStopped = false,
         FilterSettings? filterSettings = null)
     {
         var result = new AnalysisResult
@@ -77,11 +80,14 @@ public static class SessionAnalyzer
         result.GapSeconds = gaps.TotalGapSeconds;
         result.GapRatio = gaps.GapRatio;
         result.Loss = gaps.Loss;
+        result.PacketLossGapCount = gaps.PacketLossGapCount;
+        result.ConnectionLost = gaps.ConnectionLost || receiverStopped;
+        result.ConnectionLossSeconds = gaps.ConnectionLossSeconds;
         result.ValidDuration = TimeSpan.FromSeconds(
             Math.Max(0, result.Duration.TotalSeconds - gaps.TotalGapSeconds));
 
         // --- bevægelsen i sig selv ---
-        ComputeMovement(positions, result);
+        ComputeMovement(positions, result, startedAt);
 
         // --- kontaktkraft (FR-11, hvis den er realiseret) ---
         var forces = working.Where(m => m.Pressure.HasValue)
@@ -106,12 +112,12 @@ public static class SessionAnalyzer
             }
         }
 
-        DetermineStatus(result, route, connectionLost);
+        DetermineStatus(result, route, receiverStopped);
         AddNotes(result, route);
         return result;
     }
 
-    private static void ComputeMovement(List<SensorMessage> positions, AnalysisResult result)
+    private static void ComputeMovement(List<SensorMessage> positions, AnalysisResult result, DateTimeOffset startedAt)
     {
         if (positions.Count < 2) return;
 
@@ -131,7 +137,14 @@ public static class SessionAnalyzer
             // Spring over et datagab: en hastighed beregnet hen over et hul beskriver
             // ikke en bevægelse, der har fundet sted.
             if (seconds > 0 && seconds <= GapDetector.MaxSampleIntervalSeconds)
+            {
                 speeds.Add(step / seconds);
+                result.Speeds.Add(new SpeedSample
+                {
+                    OffsetSeconds = (current.PositionTimestampUtc - startedAt).TotalSeconds,
+                    SpeedMmPerSecond = step / seconds
+                });
+            }
         }
 
         result.PathLengthMm = path;
@@ -153,8 +166,21 @@ public static class SessionAnalyzer
         }
     }
 
-    private static void DetermineStatus(AnalysisResult result, ReferenceRoute? route, bool connectionLost)
+    private static void DetermineStatus(AnalysisResult result, ReferenceRoute? route, bool receiverStopped)
     {
+        // En afbrudt forbindelse gør altid sessionen ikke-vurderbar, uanset hvor kort
+        // afbrydelsen var i forhold til sessionen (NFR-R-02). Data gemmes stadig.
+        if (result.ConnectionLost)
+        {
+            result.Status = SessionStatus.NotAssessable;
+            result.StatusReason = receiverStopped
+                ? "Modtagelsen blev stoppet, mens sessionen kørte. Data er gemt, men der vises " +
+                  "ikke et resultat for en session, hvor forbindelsen var afbrudt (NFR-R-02)."
+                : $"Forbindelsen var afbrudt i {result.ConnectionLossSeconds:F1} s undervejs. Data er gemt, " +
+                  "men der vises ikke et resultat for en session, hvor forbindelsen var afbrudt (NFR-R-02).";
+            return;
+        }
+
         if (result.GapRatio > MaxGapRatio)
         {
             result.Status = SessionStatus.NotAssessable;
@@ -162,15 +188,6 @@ public static class SessionAnalyzer
                 $"{result.GapRatio * 100:F0} % af sessionen er datagab. Grænsen er " +
                 $"{MaxGapRatio * 100:F0} %, og over den kan systemet ikke skelne en god " +
                 "udførelse fra en, hvor de vanskelige passager mangler (NFR-R-02).";
-            return;
-        }
-
-        if (connectionLost)
-        {
-            result.Status = SessionStatus.Partial;
-            result.StatusReason =
-                "Forbindelsen blev afbrudt undervejs. Data er gemt, men sessionen indgår ikke " +
-                "i sammenligning med referenceruten (NFR-R-02).";
             return;
         }
 
@@ -222,8 +239,13 @@ public static class SessionAnalyzer
             result.Notes.Add($"{result.RepeatedPositionSamples} beskeder gentog en position, kameraet allerede havde leveret. " +
                              "De tæller kun én gang, så hastighed og jævnhed ikke fyldes med stilstand.");
 
-        if (result.GapCount > 0)
-            result.Notes.Add($"{result.GapCount} datagab på i alt {result.GapSeconds:F1} s er markeret og indgår ikke som målte positioner (FR-10).");
+        int signalGaps = result.Gaps.Count(g => g.Source is not (MeasurementSource.Transfer or MeasurementSource.Connection));
+        if (signalGaps > 0)
+            result.Notes.Add($"{signalGaps} datagab på i alt {result.GapSeconds:F1} s er markeret og indgår ikke som målte positioner (FR-10).");
+
+        if (result.PacketLossGapCount > 0)
+            result.Notes.Add($"{result.PacketLossGapCount} huller i løbenumrene er registreret som datagab af typen pakketab " +
+                             "og står med løbenummer i den gemte session (NFR-R-01).");
 
         if (result.Filter is { Applied: true } filter)
         {
@@ -275,6 +297,8 @@ public static class SessionAnalyzer
             $"  Kraftmålinger:          {r.ContactForceSamples}",
             $"  Gentagne positioner:    {r.RepeatedPositionSamples} (samme kamerabillede)",
             $"  Datagab:                {r.GapCount} stk., i alt {r.GapSeconds:F1} s ({r.GapRatio * 100:F1} %)",
+            $"  Heraf pakketab:         {r.PacketLossGapCount} huller i løbenumrene",
+            $"  Afbrudt forbindelse:    {(r.ConnectionLost ? $"ja, {r.ConnectionLossSeconds:F1} s" : "nej")}",
             "",
             "BEVÆGELSE",
             $"  Vejlængde:              {Fmt(r.PathLengthMm, "mm")}",

@@ -151,18 +151,7 @@ public static class Plots
         double MapX(double seconds) => left + seconds / maxSeconds * plotW;
         double MapY(double mm) => top + plotH - mm / maxValue * plotH;
 
-        // Datagab som lodrette bånd, så det er synligt, hvor der ikke er målt.
-        foreach (var gap in result.Gaps)
-        {
-            double a = (gap.StartUtc - startedAt).TotalSeconds;
-            double b = (gap.EndUtc - startedAt).TotalSeconds;
-            double x1 = MapX(Math.Max(0, a)), x2 = MapX(Math.Min(maxSeconds, b));
-            if (x2 - x1 < 1) x2 = x1 + 1;
-            var band = new Rectangle { Width = x2 - x1, Height = plotH, Fill = GapBrush };
-            Canvas.SetLeft(band, x1);
-            Canvas.SetTop(band, top);
-            canvas.Children.Add(band);
-        }
+        DrawGaps(canvas, result, startedAt, MapX, maxSeconds, top, plotH);
 
         // Akser.
         canvas.Children.Add(new Line { X1 = left, Y1 = top, X2 = left, Y2 = top + plotH, Stroke = AxisBrush, StrokeThickness = 1 });
@@ -176,7 +165,7 @@ public static class Plots
             Label(canvas, 4, y - 9, value.ToString("F0", CultureInfo.CurrentCulture) + " mm");
         }
         Label(canvas, left, top + plotH + 5, "0 s");
-        Label(canvas, left + plotW - 44, top + plotH + 5, maxSeconds.ToString("F0") + " s");
+        Label(canvas, left + plotW - 110, top + plotH + 5, $"varighed {result.Duration.TotalSeconds:F1} s");
 
         // Korridorgrænsen.
         double corridorY = MapY(result.CorridorMm);
@@ -188,11 +177,33 @@ public static class Plots
         });
         Label(canvas, left + 6, corridorY - 16, $"korridor {result.CorridorMm:F0} mm");
 
-        // Selve afvigelseskurven.
-        var curve = new Polyline { Stroke = RouteBrush, StrokeThickness = 1.6 };
+        // Selve afvigelseskurven, grøn inden for korridoren og rød uden for (tid i korridor).
+        // Kurven brydes ved et datagab, så der ikke tegnes en linje hen over et hul (FR-10).
+        Polyline? segment = null;
+        bool? segmentInside = null;
+        DeviationSample? previous = null;
         foreach (var d in result.Deviations)
-            curve.Points.Add(new Point(MapX(d.OffsetSeconds), MapY(d.DistanceMm)));
-        canvas.Children.Add(curve);
+        {
+            var point = new Point(MapX(d.OffsetSeconds), MapY(d.DistanceMm));
+            bool broken = previous is not null &&
+                          d.OffsetSeconds - previous.OffsetSeconds > GapDetector.MaxSampleIntervalSeconds;
+            if (segment is null || segmentInside != d.InsideCorridor || broken)
+            {
+                var start = segment is not null && !broken && previous is not null
+                    ? new Point(MapX(previous.OffsetSeconds), MapY(previous.DistanceMm))
+                    : (Point?)null;
+                segment = new Polyline
+                {
+                    Stroke = d.InsideCorridor ? InsideBrush : OutsideBrush,
+                    StrokeThickness = 1.6
+                };
+                if (start.HasValue) segment.Points.Add(start.Value);
+                segmentInside = d.InsideCorridor;
+                canvas.Children.Add(segment);
+            }
+            segment.Points.Add(point);
+            previous = d;
+        }
 
         // Middelværdien.
         if (result.MeanDeviationMm.HasValue)
@@ -201,10 +212,133 @@ public static class Plots
             canvas.Children.Add(new Line
             {
                 X1 = left, Y1 = meanY, X2 = left + plotW, Y2 = meanY,
-                Stroke = InsideBrush, StrokeThickness = 1.2,
+                Stroke = RouteBrush, StrokeThickness = 1.2,
                 StrokeDashArray = new DoubleCollection { 2, 3 }
             });
             Label(canvas, left + plotW - 110, meanY - 16, $"middel {result.MeanDeviationMm.Value:F1} mm");
+        }
+
+        // Den største afvigelse.
+        if (result.MaxDeviationMm.HasValue)
+        {
+            var worst = result.Deviations.MaxBy(d => d.DistanceMm)!;
+            var p = new Point(MapX(worst.OffsetSeconds), MapY(worst.DistanceMm));
+            var ring = new Ellipse { Width = 10, Height = 10, Stroke = OutsideBrush, StrokeThickness = 2 };
+            Canvas.SetLeft(ring, p.X - 5);
+            Canvas.SetTop(ring, p.Y - 5);
+            canvas.Children.Add(ring);
+            double labelX = p.X + 8 > left + plotW - 90 ? p.X - 98 : p.X + 8;
+            Label(canvas, labelX, Math.Max(12, p.Y - 20), $"største {result.MaxDeviationMm.Value:F1} mm");
+        }
+
+        // Andel af tiden i korridoren.
+        if (result.TimeInCorridorRatio.HasValue)
+            Label(canvas, left + 6, 0, $"tid i korridor {result.TimeInCorridorRatio.Value * 100:F0} %  " +
+                                       "(grøn = inden for, rød = uden for)");
+    }
+
+    // =================================================================
+    // Hastighed over tid — grundlaget for bevægelsesjævnheden (FR-09)
+    // =================================================================
+    public static void DrawSpeedChart(Canvas canvas, AnalysisResult result, DateTimeOffset startedAt)
+    {
+        canvas.Children.Clear();
+        double w = canvas.ActualWidth, h = canvas.ActualHeight;
+        if (w < 40 || h < 40) return;
+
+        if (result.Speeds.Count < 2)
+        {
+            Message(canvas, w, h, "For få positionsmålinger til at beregne hastigheden.");
+            return;
+        }
+
+        const double left = 58, right = 12, top = 16, bottom = 24;
+        double plotW = w - left - right, plotH = h - top - bottom;
+        if (plotW < 20 || plotH < 20) return;
+
+        double maxSeconds = Math.Max(result.Duration.TotalSeconds, result.Speeds[^1].OffsetSeconds);
+        if (maxSeconds <= 0) maxSeconds = 1;
+        double maxValue = result.Speeds.Max(s => s.SpeedMmPerSecond) * 1.15;
+        if (maxValue <= 0) maxValue = 1;
+
+        double MapX(double seconds) => left + seconds / maxSeconds * plotW;
+        double MapY(double v) => top + plotH - v / maxValue * plotH;
+
+        DrawGaps(canvas, result, startedAt, MapX, maxSeconds, top, plotH);
+
+        canvas.Children.Add(new Line { X1 = left, Y1 = top, X2 = left, Y2 = top + plotH, Stroke = AxisBrush, StrokeThickness = 1 });
+        canvas.Children.Add(new Line { X1 = left, Y1 = top + plotH, X2 = left + plotW, Y2 = top + plotH, Stroke = AxisBrush, StrokeThickness = 1 });
+        for (int i = 0; i <= 4; i++)
+        {
+            double value = maxValue * i / 4.0;
+            double y = MapY(value);
+            canvas.Children.Add(new Line { X1 = left - 4, Y1 = y, X2 = left, Y2 = y, Stroke = AxisBrush, StrokeThickness = 1 });
+            Label(canvas, 2, y - 9, value.ToString("F0", CultureInfo.CurrentCulture) + " mm/s");
+        }
+        Label(canvas, left, top + plotH + 5, "0 s");
+        Label(canvas, left + plotW - 110, top + plotH + 5, $"varighed {result.Duration.TotalSeconds:F1} s");
+
+        // Kurven brydes ved datagab; der er ikke beregnet hastighed hen over et hul.
+        Polyline? curve = null;
+        SpeedSample? previous = null;
+        foreach (var s in result.Speeds)
+        {
+            bool broken = previous is not null &&
+                          s.OffsetSeconds - previous.OffsetSeconds > GapDetector.MaxSampleIntervalSeconds;
+            if (curve is null || broken)
+            {
+                curve = new Polyline { Stroke = RouteBrush, StrokeThickness = 1.4 };
+                canvas.Children.Add(curve);
+            }
+            curve.Points.Add(new Point(MapX(s.OffsetSeconds), MapY(s.SpeedMmPerSecond)));
+            previous = s;
+        }
+
+        if (result.MeanSpeedMmPerSecond.HasValue)
+        {
+            double meanY = MapY(result.MeanSpeedMmPerSecond.Value);
+            canvas.Children.Add(new Line
+            {
+                X1 = left, Y1 = meanY, X2 = left + plotW, Y2 = meanY,
+                Stroke = InsideBrush, StrokeThickness = 1.2,
+                StrokeDashArray = new DoubleCollection { 2, 3 }
+            });
+            Label(canvas, left + plotW - 130, meanY - 16, $"middel {result.MeanSpeedMmPerSecond.Value:F0} mm/s");
+        }
+
+        Label(canvas, left + 6, 0, result.SmoothnessSpeedCv.HasValue
+            ? $"bevægelsesjævnhed (CV) {result.SmoothnessSpeedCv.Value:F2}: jo mindre kurven svinger om middel, jo jævnere"
+            : "bevægelsesjævnhed kan ikke beregnes");
+    }
+
+    /// <summary>
+    /// Datagab som lodrette bånd, så det er synligt, hvor der ikke er målt (FR-10). Enkelte
+    /// tabte pakker er kun få millisekunder og vises som små streger ved tidsaksen i stedet.
+    /// </summary>
+    private static void DrawGaps(Canvas canvas, AnalysisResult result, DateTimeOffset startedAt,
+        Func<double, double> mapX, double maxSeconds, double top, double plotH)
+    {
+        foreach (var gap in result.Gaps)
+        {
+            double a = (gap.StartUtc - startedAt).TotalSeconds;
+            double b = (gap.EndUtc - startedAt).TotalSeconds;
+            double x1 = mapX(Math.Max(0, a)), x2 = mapX(Math.Min(maxSeconds, b));
+
+            if (gap.Source == MeasurementSource.Transfer)
+            {
+                canvas.Children.Add(new Line
+                {
+                    X1 = x1, Y1 = top + plotH - 6, X2 = x1, Y2 = top + plotH,
+                    Stroke = OutsideBrush, StrokeThickness = 1
+                });
+                continue;
+            }
+
+            if (x2 - x1 < 1) x2 = x1 + 1;
+            var band = new Rectangle { Width = x2 - x1, Height = plotH, Fill = GapBrush };
+            Canvas.SetLeft(band, x1);
+            Canvas.SetTop(band, top);
+            canvas.Children.Add(band);
         }
     }
 
@@ -261,6 +395,15 @@ public static class Plots
         double legendX = Math.Max(left + 6, w - 140);
         Swatch(canvas, legendX, 2, RawBrush, "rådata");
         Swatch(canvas, legendX, 17, RouteBrush, "filtreret");
+    }
+
+    /// <summary>Tømmer en graf og viser en forklaring i stedet.</summary>
+    public static void ShowMessage(Canvas canvas, string text)
+    {
+        canvas.Children.Clear();
+        double w = canvas.ActualWidth, h = canvas.ActualHeight;
+        if (w < 40 || h < 40) return;
+        Message(canvas, w, h, text);
     }
 
     // ---------------- små hjælpere ----------------

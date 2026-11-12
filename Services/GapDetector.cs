@@ -24,11 +24,19 @@ public static class GapDetector
 {
     /// <summary>
     /// Længste tilladte afstand mellem to gyldige målinger af samme signal, før det
-    /// tæller som et gab. Pi'en sender med 40 Hz, altså hvert 25. ms, og kameraet
+    /// tæller som et gab. Pi'en sender med 45 Hz, altså ca. hvert 22. ms, og kameraet
     /// leverer langsommere end det. Grænsen er sat, så kameraets egen takt og
     /// almindelig jitter ikke registreres som huller.
     /// </summary>
     public const double MaxSampleIntervalSeconds = 0.20;
+
+    /// <summary>
+    /// Kommer der slet ingen beskeder i så lang tid, er forbindelsen afbrudt (NFR-R-02).
+    /// Det adskiller sig fra en dækket markør: dér sender Pi'en stadig, bare med "pos": null.
+    /// Et sekund svarer til ca. 45 tabte beskeder i træk, hvilket almindeligt pakketab
+    /// på et lokalt netværk ikke giver.
+    /// </summary>
+    public const double ConnectionTimeoutSeconds = 1.0;
 
     /// <summary>Pakketab for én datastrøm, opgjort på løbenumrene.</summary>
     public sealed class StreamLoss
@@ -47,6 +55,13 @@ public static class GapDetector
         public double TotalGapSeconds { get; set; }
         public double GapRatio { get; set; }
         public List<MeasurementSource> SourcesWithoutData { get; } = new();
+
+        /// <summary>Sand, hvis der var mindst én periode helt uden beskeder.</summary>
+        public bool ConnectionLost { get; set; }
+        public double ConnectionLossSeconds { get; set; }
+
+        /// <summary>Antal huller i løbenumrene, registreret som datagab.</summary>
+        public int PacketLossGapCount { get; set; }
 
         public double MaxLossRatio => Loss.Count == 0 ? 0 : Loss.Max(l => l.Ratio);
     }
@@ -67,6 +82,7 @@ public static class GapDetector
         double duration = (endedAt - startedAt).TotalSeconds;
         if (duration <= 0) return report;
 
+        DetectConnectionLoss(measurements, report);
         DetectPacketLoss(measurements, report);
 
         double worstGapSeconds = 0;
@@ -149,6 +165,42 @@ public static class GapDetector
     /// betyder at afsenderen er genstartet midt i sessionen. Det er ikke tab, men det
     /// skal fremgå, fordi tallene før og efter ikke hører til samme forløb.
     /// </summary>
+    /// <summary>
+    /// Finder perioder, hvor der slet ikke kom beskeder (NFR-R-02). Ved en dækket markør
+    /// eller en sensor uden data kommer beskederne stadig, så det fanges ikke her.
+    /// Tiden måles mellem beskedernes egne tidsstempler, som alle kommer fra samme ur.
+    /// </summary>
+    private static void DetectConnectionLoss(IReadOnlyList<SensorMessage> measurements, GapReport report)
+    {
+        var ordered = measurements
+            .Where(m => m.EffectiveTimestampUtc != DateTimeOffset.MinValue)
+            .OrderBy(m => m.EffectiveTimestampUtc)
+            .ToList();
+
+        for (int i = 1; i < ordered.Count; i++)
+        {
+            var previous = ordered[i - 1];
+            var current = ordered[i];
+            double seconds = (current.EffectiveTimestampUtc - previous.EffectiveTimestampUtc).TotalSeconds;
+            if (seconds <= ConnectionTimeoutSeconds) continue;
+
+            int missing = previous.SequenceNumber.HasValue && current.SequenceNumber.HasValue &&
+                          current.SequenceNumber > previous.SequenceNumber
+                ? (int)(current.SequenceNumber.Value - previous.SequenceNumber.Value - 1)
+                : 0;
+
+            var gap = Gap(MeasurementSource.Connection, previous.EffectiveTimestampUtc,
+                current.EffectiveTimestampUtc, seconds,
+                $"Forbindelsen var afbrudt: ingen beskeder i {seconds:F1} s" +
+                (missing > 0 ? $" ({missing} løbenumre mangler)." : "."));
+            gap.MissingSequenceNumbers = missing;
+            report.Gaps.Add(gap);
+
+            report.ConnectionLost = true;
+            report.ConnectionLossSeconds += seconds;
+        }
+    }
+
     private static void DetectPacketLoss(IReadOnlyList<SensorMessage> measurements, GapReport report)
     {
         foreach (var group in measurements.GroupBy(m => m.StreamKey))
@@ -156,7 +208,6 @@ public static class GapDetector
             var numbered = group
                 .Where(m => m.SequenceNumber.HasValue)
                 .OrderBy(m => m.EffectiveTimestampUtc)
-                .Select(m => m.SequenceNumber!.Value)
                 .ToList();
 
             if (numbered.Count < 2) continue;
@@ -164,7 +215,9 @@ public static class GapDetector
             var loss = new StreamLoss { Stream = group.Key };
             for (int i = 1; i < numbered.Count; i++)
             {
-                long jump = numbered[i] - numbered[i - 1];
+                var previous = numbered[i - 1];
+                var current = numbered[i];
+                long jump = current.SequenceNumber!.Value - previous.SequenceNumber!.Value;
                 if (jump == 1)
                 {
                     loss.Expected++;
@@ -173,8 +226,25 @@ public static class GapDetector
                 {
                     loss.Expected += jump;
                     loss.Missing += jump - 1;
+
+                    // Hvert hul i løbenumrene registreres som et datagab (NFR-R-01, SyT-06).
+                    // Et hul på over et sekund er allerede registreret som afbrudt forbindelse
+                    // og tilføjes ikke to gange.
+                    double seconds = (current.EffectiveTimestampUtc - previous.EffectiveTimestampUtc).TotalSeconds;
+                    if (seconds <= ConnectionTimeoutSeconds)
+                    {
+                        long first = previous.SequenceNumber.Value + 1, last = current.SequenceNumber.Value - 1;
+                        var gap = Gap(MeasurementSource.Transfer, previous.EffectiveTimestampUtc,
+                            current.EffectiveTimestampUtc, Math.Max(0, seconds),
+                            first == last
+                                ? $"Pakketab: løbenummer {first} mangler."
+                                : $"Pakketab: løbenummer {first}–{last} mangler ({jump - 1} stk.).");
+                        gap.MissingSequenceNumbers = (int)(jump - 1);
+                        report.Gaps.Add(gap);
+                        report.PacketLossGapCount++;
+                    }
                 }
-                else if (numbered[i] < 5 && numbered[i - 1] > 50)
+                else if (current.SequenceNumber.Value < 5 && previous.SequenceNumber.Value > 50)
                 {
                     loss.Restarts++;
                 }

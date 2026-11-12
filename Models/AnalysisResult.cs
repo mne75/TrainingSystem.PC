@@ -6,13 +6,19 @@ public enum MeasurementSource
     Position,
     Orientation,
     ContactForce,
-    Unknown
+    Unknown,
+
+    /// <summary>Et hul i løbenumrene: beskeder, der blev sendt, men aldrig nåede frem (NFR-R-01).</summary>
+    Transfer,
+
+    /// <summary>En periode, hvor der slet ikke kom beskeder: forbindelsen var afbrudt (NFR-R-02).</summary>
+    Connection
 }
 
 /// <summary>
-/// En periode uden gyldige målinger (FR-10). Et datagab opstår enten, fordi
-/// trackingmarkøren var dækket, eller fordi UDP-pakker er gået tabt.
-/// Systemet må ikke erstatte et gab med beregnede positioner.
+/// En periode uden gyldige målinger (FR-10). Et datagab opstår, fordi trackingmarkøren
+/// var dækket (Position), fordi enkelte UDP-pakker gik tabt (Transfer), eller fordi
+/// forbindelsen var afbrudt (Connection). Systemet må ikke erstatte et gab med beregnede positioner.
 /// </summary>
 public sealed class DataGap
 {
@@ -35,6 +41,13 @@ public enum SessionStatus
 
     /// <summary>Datagabene er så store, at et resultat ville være misvisende frem for upræcist.</summary>
     NotAssessable
+}
+
+/// <summary>Probens hastighed mellem to kamerabilleder. Grundlaget for bevægelsesjævnheden (FR-09).</summary>
+public sealed class SpeedSample
+{
+    public double OffsetSeconds { get; set; }
+    public double SpeedMmPerSecond { get; set; }
 }
 
 /// <summary>Én positionsmåling holdt op mod referenceruten.</summary>
@@ -98,6 +111,18 @@ public sealed class AnalysisResult
     /// <summary>Antal gange en afsender blev genstartet midt i sessionen.</summary>
     public int SenderRestarts => Loss.Sum(l => l.Restarts);
 
+    /// <summary>
+    /// Sand, hvis forbindelsen var afbrudt undervejs: enten kom der slet ingen beskeder i
+    /// over et sekund, eller modtagelsen blev stoppet under sessionen (NFR-R-02).
+    /// </summary>
+    public bool ConnectionLost { get; set; }
+
+    /// <summary>Samlet tid uden nogen beskeder overhovedet.</summary>
+    public double ConnectionLossSeconds { get; set; }
+
+    /// <summary>Antal huller i løbenumrene, registreret som datagab af typen Transfer (NFR-R-01).</summary>
+    public int PacketLossGapCount { get; set; }
+
     public double CorridorMm { get; set; }
     public string? ReferenceRouteName { get; set; }
 
@@ -106,6 +131,10 @@ public sealed class AnalysisResult
 
     public List<DataGap> Gaps { get; set; } = new();
     public List<DeviationSample> Deviations { get; set; } = new();
+
+    /// <summary>Hastigheden over sessionen. Bevægelsesjævnheden (CV) beregnes ud fra den.</summary>
+    public List<SpeedSample> Speeds { get; set; } = new();
+
     public List<string> Notes { get; set; } = new();
 
     /// <summary>Feedback må kun vises, når sessionen kan vurderes (NFR-R-02).</summary>

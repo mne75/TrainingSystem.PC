@@ -22,6 +22,16 @@ public sealed class SessionRecord
     public List<SensorMessage> Measurements { get; set; } = new();
     public AnalysisResult? Analysis { get; set; }
 
+    /// <summary>
+    /// Filterindstillingen, analysen blev beregnet med. Gemmes, så en indlæst session
+    /// beregnes med samme filter og giver samme værdier (FR-05), uanset hvad der står i
+    /// vinduet, når den åbnes. Null i sessioner gemt før denne version.
+    /// </summary>
+    public Services.FilterSettings? Filter { get; set; }
+
+    /// <summary>Sand, hvis modtagelsen blev stoppet, mens sessionen kørte (NFR-R-02).</summary>
+    public bool ReceiverStopped { get; set; }
+
     public string FileName =>
         $"session_{StartedAtUtc.UtcDateTime:yyyyMMdd_HHmmss}.json";
 }

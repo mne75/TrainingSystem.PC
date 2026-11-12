@@ -427,6 +427,135 @@ await using (var failing = new SessionService(saveSession: _ => throw new IOExce
           o.SavedPath is null && o.SaveError == "disken er fuld" && o.Result.PositionSamples == 101);
 }
 
+// --- Systemtestene SyT-01, SyT-02, SyT-04 og SyT-06 uden hardware ----------
+// En session i Pi'ens format: 45 Hz, kameraet leverer hver anden besked, proben følger
+// referenceruten (0,0)-(200,0). "drop" fjerner beskeder (tabt i nettet), "covered"
+// giver "pos": null (markøren dækket, men beskeden kommer frem).
+List<SensorMessage> PiSession(double seconds, Func<int, double, bool>? drop = null,
+                              Func<double, bool>? covered = null, double noiseMm = 0)
+{
+    var list = new List<SensorMessage>();
+    int n = (int)(seconds * 45);
+    double lastX = 0, lastY = 0;
+    DateTimeOffset lastCam = start;
+    for (int i = 0; i < n; i++)
+    {
+        double s = i / 45.0;
+        var t = start.AddSeconds(s);
+        bool hidden = covered?.Invoke(s) ?? false;
+        if (i % 2 == 0 && !hidden)
+        {
+            lastCam = t;
+            lastX = Math.Min(200, s * 200 / seconds);
+            // Deterministisk "støj" omkring ruten, så filtrering kan ses i tallene.
+            lastY = noiseMm * Math.Sin(i * 1.7) * Math.Cos(i * 0.37);
+        }
+        if (drop?.Invoke(i, s) ?? false) continue;
+        list.Add(new SensorMessage
+        {
+            Seq = i + 1,
+            T = t.ToUnixTimeMilliseconds() / 1000.0,
+            Quat = new SensorMessage.QuaternionPayload { W = 1 },
+            ForceN = 2.0,
+            Pos = hidden ? null : new SensorMessage.PositionPayload { X = lastX, Y = lastY, Inside = true },
+            TrackStatus = hidden ? "probe marker (ID 4) not visible" : "probe: ok",
+            PositionAgeMs = hidden ? null : (int)(t - lastCam).TotalMilliseconds
+        }.Normalize());
+    }
+    return list;
+}
+
+// SyT-04, session 3: Wi-Fi afbrudt i 10 s af en session på 60 s. Det er kun 17 % af
+// varigheden, altså under 25 %-grænsen, men en afbrudt forbindelse skal altid give
+// ikke-vurderbar (NFR-R-02), og de modtagne data må ikke gå tabt.
+var wifi = PiSession(60, drop: (_, s) => s >= 20 && s < 30);
+var rWifi = SessionAnalyzer.Analyze(start, start.AddSeconds(60), wifi, route);
+Check("SyT-04/3: afbrudt forbindelse opdaget", rWifi.ConnectionLost,
+      $"{rWifi.ConnectionLossSeconds:F1} s");
+Check("SyT-04/3: ikke-vurderbar trods gab under 25 %",
+      rWifi.Status == SessionStatus.NotAssessable && rWifi.GapRatio < SessionAnalyzer.MaxGapRatio,
+      $"{rWifi.Status}, gab {rWifi.GapRatio * 100:F0} %");
+Check("SyT-04/3: afbrydelsen står som datagab",
+      rWifi.Gaps.Any(g => g.Source == MeasurementSource.Connection && g.DurationSeconds > 9.5));
+Check("SyT-04/3: modtagne data bevaret", rWifi.TotalMessages == wifi.Count, $"{rWifi.TotalMessages}");
+Check("SyT-04/3: ingen feedback", !rWifi.MayShowFeedback);
+
+// SyT-04, session 1: markøren dækket i 3 s. Beskederne kommer stadig, så det er et
+// datagab i positionen, ikke en afbrudt forbindelse, og sessionen kan vurderes.
+var cover = PiSession(60, covered: s => s >= 20 && s < 23);
+var rCover = SessionAnalyzer.Analyze(start, start.AddSeconds(60), cover, route);
+Check("SyT-04/1: dækket markør er ikke afbrudt forbindelse", !rCover.ConnectionLost);
+Check("SyT-04/1: sessionen kan vurderes", rCover.Status == SessionStatus.Completed, rCover.StatusReason);
+var coverGap = rCover.Gaps.FirstOrDefault(g => g.Source == MeasurementSource.Position);
+Check("SyT-04/1: gabet har varighed og årsag",
+      coverGap is { DurationSeconds: > 2.9 } && coverGap.Reason.Contains("not visible"),
+      coverGap is null ? "intet gab" : $"{coverGap.DurationSeconds:F2} s, {coverGap.Reason}");
+
+// Modtagelsen stoppet under sessionen: også ikke-vurderbar.
+var rStopped = SessionAnalyzer.Analyze(start, start.AddSeconds(60), cover, route, receiverStopped: true);
+Check("NFR-R-02: stoppet modtagelse giver ikke-vurderbar", rStopped.Status == SessionStatus.NotAssessable);
+
+// SyT-06: hvert manglende løbenummer skal stå som datagab. Tre enkelte tab og ét
+// hul på tre i træk, i alt 6 af 2700 (0,2 %).
+var lossy = PiSession(60, drop: (i, _) => i is 500 or 900 or 1300 or 2000 or 2001 or 2002);
+var rLoss = SessionAnalyzer.Analyze(start, start.AddSeconds(60), lossy, route);
+var transfer = rLoss.Gaps.Where(g => g.Source == MeasurementSource.Transfer).ToList();
+Check("SyT-06: hvert hul i løbenumrene er et datagab", transfer.Count == 4 && rLoss.PacketLossGapCount == 4,
+      $"{transfer.Count} gab");
+Check("SyT-06: alle manglende løbenumre talt med", transfer.Sum(g => g.MissingSequenceNumbers) == 6,
+      $"{transfer.Sum(g => g.MissingSequenceNumbers)} løbenumre");
+Check("SyT-06: løbenummeret står i årsagen", transfer.Any(g => g.Reason.Contains("501")),
+      transfer.FirstOrDefault()?.Reason ?? "ingen");
+Check("SyT-06: tab under 1 %", rLoss.MaxPacketLossRatio < 0.01, $"{rLoss.MaxPacketLossRatio * 100:F2} %");
+Check("SyT-06: enkelte tab gør ikke sessionen ikke-vurderbar",
+      rLoss.Status == SessionStatus.Completed && !rLoss.ConnectionLost, rLoss.StatusReason);
+
+// SyT-01: alle fem værdier i FR-09 skal også kunne vises som graf. Hastighedskurven er
+// grundlaget for jævnheden, og dens middel skal være den samme middelhastighed.
+var rRun = SessionAnalyzer.Analyze(start, start.AddSeconds(60), PiSession(60), route);
+Check("SyT-01: hastighedskurve beregnet", rRun.Speeds.Count > 100, $"{rRun.Speeds.Count} punkter");
+Check("SyT-01: hastighedskurven passer med middelhastigheden",
+      Math.Abs(rRun.Speeds.Average(s => s.SpeedMmPerSecond) - rRun.MeanSpeedMmPerSecond!.Value) < 1e-9);
+Check("SyT-01: afvigelseskurven har tidsakse", rRun.Deviations.Count > 0 &&
+      rRun.Deviations[^1].OffsetSeconds > 59, $"{rRun.Deviations[^1].OffsetSeconds:F1} s");
+
+// SyT-02: en indlæst session beregnes med det filter, den blev optaget med, også selv
+// om filteret i vinduet er ændret i mellemtiden (FR-05).
+SessionRecord? kept = null;
+await using (var service = new SessionService(saveSession: s => { kept = s; return "x"; }))
+{
+    await service.StartListeningAsync(freePort, _ => Task.CompletedTask);
+    service.StartSession(route, 15);
+    var noisy = PiSession(30, noiseMm: 4);
+    foreach (var m in noisy) await service.HandleMeasurementAsync(m);
+    var recorded = service.EndSession(new FilterSettings { WindowMs = 150 });
+    await service.StopListeningAsync();
+
+    Check("SyT-02: filteret gemmes med sessionen", kept?.Filter is { Enabled: true, WindowMs: 150 });
+
+    // Testen giver kun mening, hvis filteret faktisk flytter tallene.
+    var unfiltered = SessionAnalyzer.Analyze(kept!.StartedAtUtc, kept.EndedAtUtc, kept.Measurements,
+                                             kept.ReferenceRoute, false, FilterSettings.Off);
+    Check("SyT-02: filteret ændrer middelafvigelsen (ellers beviser testen intet)",
+          Math.Abs(unfiltered.MeanDeviationMm!.Value - recorded.Result.MeanDeviationMm!.Value) > 0.1,
+          $"uden filter {unfiltered.MeanDeviationMm:F2} mm, med {recorded.Result.MeanDeviationMm:F2} mm");
+
+    string file = Path.Combine(Path.GetTempPath(), $"syt02_{Guid.NewGuid():N}.json");
+    File.WriteAllText(file, System.Text.Json.JsonSerializer.Serialize(kept));
+    try
+    {
+        var (_, reopened) = service.OpenSession(file, FilterSettings.Off);
+        Check("SyT-02: samme værdier efter indlæsning, trods andet filter i vinduet",
+              reopened.MeanDeviationMm == recorded.Result.MeanDeviationMm &&
+              reopened.MaxDeviationMm == recorded.Result.MaxDeviationMm &&
+              reopened.TimeInCorridorRatio == recorded.Result.TimeInCorridorRatio &&
+              reopened.SmoothnessSpeedCv == recorded.Result.SmoothnessSpeedCv &&
+              reopened.Status == recorded.Result.Status,
+              $"middel {reopened.MeanDeviationMm:F3} mod {recorded.Result.MeanDeviationMm:F3}");
+    }
+    finally { File.Delete(file); }
+}
+
 
 Console.WriteLine();
 Console.WriteLine(failures == 0 ? "ALLE TEST BESTAAET" : $"{failures} TEST FEJLEDE");

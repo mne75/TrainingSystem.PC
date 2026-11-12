@@ -289,6 +289,10 @@ public partial class MainWindow : Window
     {
         if (!_session.IsSessionActive) return;
 
+        // Tiden fra afslutning til visning af feedback måles, så NFR-P-01 (SyT-05) kan
+        // aflæses direkte i stedet for med stopur.
+        var clock = Stopwatch.StartNew();
+
         // Sessionstjenesten analyserer og gemmer; vinduet viser kun resultatet.
         var outcome = _session.EndSession(ReadFilterSettings());
 
@@ -305,6 +309,16 @@ public partial class MainWindow : Window
             (outcome.SavedPath is not null
                 ? "Rådata og analyse er gemt i:" + Environment.NewLine + outcome.SavedPath
                 : "Sessionen kunne ikke gemmes: " + outcome.SaveError);
+
+        // Måles først, når vinduet har tegnet resultatet færdigt.
+        Dispatcher.InvokeAsync(() =>
+        {
+            clock.Stop();
+            string timing = $"Feedback vist {clock.Elapsed.TotalSeconds:F2} s efter, at sessionen blev afsluttet " +
+                            $"(NFR-P-01, grænse {SessionAnalyzer.MaxFeedbackSeconds:F0} s).";
+            SessionStatusText.Text = "Session afsluttet. " + timing;
+            AnalysisTextBox.Text += Environment.NewLine + Environment.NewLine + timing;
+        }, System.Windows.Threading.DispatcherPriority.ContextIdle);
     }
 
     private void OpenSessionButton_Click(object sender, RoutedEventArgs e)
@@ -390,13 +404,17 @@ public partial class MainWindow : Window
         // Den udførte rute i 3D tegnes først nu.
         RebuildTrajectory(session.Measurements);
 
-        // Datagab
-        GapsText.Text = result.Gaps.Count == 0
-            ? "Ingen datagab registreret."
-            : string.Join(Environment.NewLine,
-                result.Gaps.Take(12).Select(g =>
-                    $"{g.StartUtc:HH:mm:ss} → {g.EndUtc:HH:mm:ss}  ({g.DurationSeconds:F2} s)  {g.Reason}"))
-              + (result.Gaps.Count > 12 ? Environment.NewLine + $"… og {result.Gaps.Count - 12} flere." : "");
+        // Datagab. Enkelte tabte pakker kan være mange og korte; de opsummeres på én linje,
+        // så de længere gab (dækket markør, afbrudt forbindelse) ikke forsvinder i listen.
+        // Hvert enkelt står med løbenummer i den gemte session og i analyseteksten.
+        var longGaps = result.Gaps.Where(g => g.Source != MeasurementSource.Transfer).ToList();
+        var lines = longGaps.Take(12).Select(g =>
+            $"{g.StartUtc:HH:mm:ss} → {g.EndUtc:HH:mm:ss}  ({g.DurationSeconds:F2} s)  {g.Reason}").ToList();
+        if (longGaps.Count > 12) lines.Add($"… og {longGaps.Count - 12} flere.");
+        if (result.PacketLossGapCount > 0)
+            lines.Add($"Pakketab: {result.PacketLossGapCount} huller i løbenumrene, " +
+                      $"{result.MaxPacketLossRatio * 100:F2} % af beskederne (NFR-R-01).");
+        GapsText.Text = lines.Count == 0 ? "Ingen datagab registreret." : string.Join(Environment.NewLine, lines);
 
         // Målingstabellen
         _rows.Clear();
@@ -412,8 +430,21 @@ public partial class MainWindow : Window
 
         var recorded = BuildPath(_lastSession, _lastResult);
         Plots.DrawRouteOverlay(RouteCanvas, recorded, _lastSession.ReferenceRoute);
-        Plots.DrawDeviationChart(DeviationCanvas, _lastResult, _lastSession.StartedAtUtc);
         Plots.DrawFilterComparison(FilterCanvas, _lastResult.Filter);
+
+        // En session, der ikke kan vurderes, får hverken tal eller grafer for afvigelse
+        // og jævnhed (NFR-R-02) — de samme værdier, som kortene ovenfor skjuler.
+        if (_lastResult.MayShowFeedback)
+        {
+            Plots.DrawDeviationChart(DeviationCanvas, _lastResult, _lastSession.StartedAtUtc);
+            Plots.DrawSpeedChart(SpeedCanvas, _lastResult, _lastSession.StartedAtUtc);
+        }
+        else
+        {
+            string reason = $"Ingen vurdering: sessionen er {SessionAnalyzer.Status(_lastResult.Status).ToLower()} (NFR-R-02).";
+            Plots.ShowMessage(DeviationCanvas, reason);
+            Plots.ShowMessage(SpeedCanvas, reason);
+        }
     }
 
     private static List<PathPoint> BuildPath(SessionRecord session, AnalysisResult result)
@@ -436,6 +467,8 @@ public partial class MainWindow : Window
     private void DeviationCanvas_SizeChanged(object sender, SizeChangedEventArgs e) => DrawPlots();
 
     private void FilterCanvas_SizeChanged(object sender, SizeChangedEventArgs e) => DrawPlots();
+
+    private void SpeedCanvas_SizeChanged(object sender, SizeChangedEventArgs e) => DrawPlots();
 
     private static string Fmt(double? value) => value.HasValue ? value.Value.ToString("F1") : "—";
 
