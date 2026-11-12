@@ -503,8 +503,11 @@ public partial class MainWindow : Window
 
         // Det kalibrerede kvadrat og de fire hjørnemarkører, så probens placering kan ses i
         // forhold til dem. ID 0 er rød: det er (0, 0) i Pi'ens koordinater.
-        var (minX, minZ) = ToScene(0, 0);
-        var (maxX, maxZ) = ToScene(BoardSideMm, BoardSideMm);
+        // Hjørnerne sorteres, så bredden altid er positiv, uanset hvilken vej akserne vender.
+        var (ax, az) = ToScene(0, 0);
+        var (bx, bz) = ToScene(BoardSideMm, BoardSideMm);
+        double minX = Math.Min(ax, bx), maxX = Math.Max(ax, bx);
+        double minZ = Math.Min(az, bz), maxZ = Math.Max(az, bz);
         var edge = Color.FromRgb(120, 132, 150);
         scene.Children.Add(Box(new Point3D((minX + maxX) / 2, 0.006, minZ), new Size3D(maxX - minX, 0.01, 0.015), edge));
         scene.Children.Add(Box(new Point3D((minX + maxX) / 2, 0.006, maxZ), new Size3D(maxX - minX, 0.01, 0.015), edge));
