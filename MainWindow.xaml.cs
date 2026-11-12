@@ -616,9 +616,11 @@ public partial class MainWindow : Window
     /// Omregner en position i mm fra Pi'en til scenens koordinater. Midten af det kalibrerede
     /// kvadrat ligger i midten af braettet, saa proben vises der, hvor den faktisk er i
     /// forhold til hjoernemarkoererne. Positioner uden for braettet holdes ved kanten.
+    /// x er vendt, fordi Pi'ens x-akse peger den modsatte vej af scenens, set fra brugeren
+    /// (afproevet med den rigtige opstilling 12/11).
     /// </summary>
     private static (double X, double Z) ToScene(double xMm, double yMm) =>
-        (Math.Clamp((xMm - BoardSideMm / 2) * SceneScale, -1.9, 1.9),
+        (Math.Clamp(-(xMm - BoardSideMm / 2) * SceneScale, -1.9, 1.9),
          Math.Clamp((yMm - BoardSideMm / 2) * SceneScale, -1.9, 1.9));
 
     private static List<(double X, double Y)> Thin(List<(double X, double Y)> points, int step)
