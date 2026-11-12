@@ -8,7 +8,6 @@ namespace TrainingSystem.Tests;
 // bagefter den samme analyse ud. Det gør det muligt at afgøre, om det er netværket,
 // afsenderne eller brugergrænsefladen, der driller — uden at skulle gætte.
 //   dotnet run -- --listen
-//   dotnet run -- --listen --port 5005 --seconds 30 --rute minrute.json
 
 public static class Listen
 {

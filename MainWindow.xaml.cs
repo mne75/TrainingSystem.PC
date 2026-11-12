@@ -24,7 +24,16 @@ public partial class MainWindow : Window
 
     private SensorMessage? _latestPositionMessage;
     private SensorMessage? _latestOrientationMessage;
-    private (double X, double Y)? _positionOrigin;
+
+    /// <summary>
+    /// Afstanden mellem hjørnemarkørernes centre i mm. Skal være den samme som SIDE_MM i
+    /// sensor_stream_tracking.py på Pi'en (260 mm efter rettelsen i MT3.4). Pi'en giver
+    /// positionen i mm med markør ID 0 i (0, 0) og ID 2 i (side, side).
+    /// </summary>
+    private const double BoardSideMm = 260.0;
+
+    /// <summary>3D-enheder pr. mm. Brættet i scenen er 4 × 4 enheder, kvadratet 2,6 × 2,6.</summary>
+    private const double SceneScale = 0.01;
 
     // Sporet viser hele den udfoerte rute for sessionen. Nye punkter tegnes paa med det
     // samme i stedet for at hele sporet tegnes om, og naar antallet vokser for stort,
@@ -257,7 +266,6 @@ public partial class MainWindow : Window
         }
 
         _rows.Clear();
-        _positionOrigin = null;
         _latestPositionMessage = null;
         _latestOrientationMessage = null;
         _lastResult = null;
@@ -492,6 +500,27 @@ public partial class MainWindow : Window
             scene.Children.Add(Box(new Point3D(i * 0.4, 0.002, 0), new Size3D(0.008, 0.008, 3.2), Color.FromRgb(205, 213, 224)));
             scene.Children.Add(Box(new Point3D(0, 0.002, i * 0.4), new Size3D(3.2, 0.008, 0.008), Color.FromRgb(205, 213, 224)));
         }
+
+        // Det kalibrerede kvadrat og de fire hjørnemarkører, så probens placering kan ses i
+        // forhold til dem. ID 0 er rød: det er (0, 0) i Pi'ens koordinater.
+        var (minX, minZ) = ToScene(0, 0);
+        var (maxX, maxZ) = ToScene(BoardSideMm, BoardSideMm);
+        var edge = Color.FromRgb(120, 132, 150);
+        scene.Children.Add(Box(new Point3D((minX + maxX) / 2, 0.006, minZ), new Size3D(maxX - minX, 0.01, 0.015), edge));
+        scene.Children.Add(Box(new Point3D((minX + maxX) / 2, 0.006, maxZ), new Size3D(maxX - minX, 0.01, 0.015), edge));
+        scene.Children.Add(Box(new Point3D(minX, 0.006, (minZ + maxZ) / 2), new Size3D(0.015, 0.01, maxZ - minZ), edge));
+        scene.Children.Add(Box(new Point3D(maxX, 0.006, (minZ + maxZ) / 2), new Size3D(0.015, 0.01, maxZ - minZ), edge));
+        foreach (var (mx, my, color) in new[]
+                 {
+                     (0.0, 0.0, Color.FromRgb(200, 40, 40)),
+                     (BoardSideMm, 0.0, Color.FromRgb(30, 30, 30)),
+                     (BoardSideMm, BoardSideMm, Color.FromRgb(30, 30, 30)),
+                     (0.0, BoardSideMm, Color.FromRgb(30, 30, 30))
+                 })
+        {
+            var (sx, sz) = ToScene(mx, my);
+            scene.Children.Add(Box(new Point3D(sx, 0.012, sz), new Size3D(0.16, 0.02, 0.16), color));
+        }
         SceneVisual.Content = scene;
 
         var probe = new Model3DGroup();
@@ -528,7 +557,6 @@ public partial class MainWindow : Window
                                     .OrderBy(m => m.EffectiveTimestampUtc)
                                     .Select(m => (m.X!.Value, m.Y!.Value))
                                     .ToList();
-        if (positions.Count > 0) _positionOrigin = positions[0];
 
         // Efter sessionen tegnes hele ruten med alle maalte punkter, uden udtynding.
         var points = positions.Count > TrajectoryMaxPoints * 2
@@ -551,7 +579,6 @@ public partial class MainWindow : Window
             if (Math.Sqrt(dx * dx + dy * dy) < _trajectoryStepMm) return;
         }
 
-        _positionOrigin ??= (x, y);
         _trajectoryPoints.Add((x, y));
 
         if (_trajectoryPoints.Count > TrajectoryMaxPoints)
@@ -573,23 +600,26 @@ public partial class MainWindow : Window
     private void DrawTrajectory(IReadOnlyList<(double X, double Y)> points)
     {
         _trajectoryGroup = new Model3DGroup();
-        if (points.Count > 0)
-        {
-            _positionOrigin ??= points[0];
-            foreach (var point in points) _trajectoryGroup.Children.Add(Marker(point.X, point.Y));
-        }
+        foreach (var point in points) _trajectoryGroup.Children.Add(Marker(point.X, point.Y));
         TrajectoryVisual.Content = _trajectoryGroup;
     }
 
-    /// <summary>Et enkelt punkt paa sporet, placeret relativt til sessionens foerste position.</summary>
-    private GeometryModel3D Marker(double xMm, double yMm)
+    /// <summary>Et enkelt punkt paa sporet, placeret der hvor det blev maalt paa braettet.</summary>
+    private static GeometryModel3D Marker(double xMm, double yMm)
     {
-        double originX = _positionOrigin?.X ?? 0, originY = _positionOrigin?.Y ?? 0;
-        double x = Math.Clamp((xMm - originX) * 0.01, -1.5, 1.5);
-        double z = Math.Clamp((yMm - originY) * 0.01, -1.5, 1.5);
+        var (x, z) = ToScene(xMm, yMm);
         return Box(new Point3D(x, 0.025, z), new Size3D(0.045, 0.035, 0.045),
                    Color.FromRgb(80, 170, 220));
     }
+
+    /// <summary>
+    /// Omregner en position i mm fra Pi'en til scenens koordinater. Midten af det kalibrerede
+    /// kvadrat ligger i midten af braettet, saa proben vises der, hvor den faktisk er i
+    /// forhold til hjoernemarkoererne. Positioner uden for braettet holdes ved kanten.
+    /// </summary>
+    private static (double X, double Z) ToScene(double xMm, double yMm) =>
+        (Math.Clamp((xMm - BoardSideMm / 2) * SceneScale, -1.9, 1.9),
+         Math.Clamp((yMm - BoardSideMm / 2) * SceneScale, -1.9, 1.9));
 
     private static List<(double X, double Y)> Thin(List<(double X, double Y)> points, int step)
     {
@@ -608,10 +638,8 @@ public partial class MainWindow : Window
         var position = _latestPositionMessage;
         if (position?.HasPositionXY == true)
         {
-            _positionOrigin ??= (position.X!.Value, position.Y!.Value);
-            // Visningen er bevidst relativ og skaleret til vinduet. Den er ikke en kalibreret 3D-position.
-            px = Math.Clamp((position.X!.Value - _positionOrigin.Value.X) * 0.01, -1.5, 1.5);
-            pz = Math.Clamp((position.Y!.Value - _positionOrigin.Value.Y) * 0.01, -1.5, 1.5);
+            // Placeret i forhold til hjoernemarkoererne. Hoejden (y) maales ikke; proben staar paa braettet.
+            (px, pz) = ToScene(position.X!.Value, position.Y!.Value);
             if (position.Z.HasValue) py = Math.Clamp(position.Z.Value * 0.01, -1.0, 1.0);
         }
 
